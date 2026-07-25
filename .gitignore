@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual envs
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PyTorch checkpoints (large)
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Generated artifacts (keep JSON reports, ignore checkpoints)
+cognet-moe/edt_ckpts/*.pt
+
+# Logs
+*.log
+wandb/
+runs/
+
+# Tokenizer training cache
+__tokenizer_cache__/

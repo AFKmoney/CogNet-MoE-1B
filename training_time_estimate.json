@@ -1,0 +1,146 @@
+{
+  "model": "CogNet-MoE-1B",
+  "architecture": "CogNet-native MoE (8 canaux = 8 experts, coherence O(n) routing)",
+  "tokenizer": "BPE propri\u00e9taire 16k",
+  "scenario_c_tokens_phase3": 1361634450,
+  "full_chinchilla_tokens": 47657205760,
+  "active_params_per_token": 2382860288,
+  "total_params": 7214895104,
+  "per_gpu_estimate_with_pgsu": {
+    "RTX 3090": {
+      "mfu_realistic": 0.18,
+      "phase_1_experts_h": 6.8373500260824205,
+      "phase_2a_router_memory_composer_h": 0.1,
+      "phase_2b_encoder_h": 1.0939760041731872,
+      "phase_3_joint_h": 211.56655305671111,
+      "phase_3_tokens": 1361634450,
+      "total_h": 219.5978790869667,
+      "total_d": 9.149911628623613,
+      "total_cost_usd": 87.83915163478669,
+      "tokens_per_sec_phase3": 1787.76742449115,
+      "flops_per_token_phase3": 7148580864.0
+    },
+    "RTX 4090": {
+      "mfu_realistic": 0.22,
+      "phase_1_experts_h": 2.4071992653810836,
+      "phase_2a_router_memory_composer_h": 0.1,
+      "phase_2b_encoder_h": 0.5,
+      "phase_3_joint_h": 74.48541454723879,
+      "phase_3_tokens": 1361634450,
+      "total_h": 77.49261381261988,
+      "total_d": 3.2288589088591615,
+      "total_cost_usd": 42.620937596940934,
+      "tokens_per_sec_phase3": 5077.9309474983365,
+      "flops_per_token_phase3": 7148580864.0
+    },
+    "A100 40GB": {
+      "mfu_realistic": 0.38,
+      "phase_1_experts_h": 0.7370220422852002,
+      "phase_2a_router_memory_composer_h": 0.1,
+      "phase_2b_encoder_h": 0.5,
+      "phase_3_joint_h": 22.805503947914712,
+      "phase_3_tokens": 1361634450,
+      "total_h": 24.14252599019991,
+      "total_d": 1.0059385829249963,
+      "total_cost_usd": 36.213788985299864,
+      "tokens_per_sec_phase3": 16585.110003730104,
+      "flops_per_token_phase3": 7148580864.0
+    },
+    "A100 80GB": {
+      "mfu_realistic": 0.42,
+      "phase_1_experts_h": 0.6668294668294669,
+      "phase_2a_router_memory_composer_h": 0.1,
+      "phase_2b_encoder_h": 0.5,
+      "phase_3_joint_h": 20.633551190970454,
+      "phase_3_tokens": 1361634450,
+      "total_h": 21.90038065779992,
+      "total_d": 0.9125158607416634,
+      "total_cost_usd": 39.42068518403986,
+      "tokens_per_sec_phase3": 18330.911056754325,
+      "flops_per_token_phase3": 7148580864.0
+    },
+    "H100 SXM": {
+      "mfu_realistic": 0.48,
+      "phase_1_experts_h": 0.5,
+      "phase_2a_router_memory_composer_h": 0.1,
+      "phase_2b_encoder_h": 0.5,
+      "phase_3_joint_h": 5.695611198316414,
+      "phase_3_tokens": 1361634450,
+      "total_h": 6.795611198316415,
+      "total_d": 0.28315046659651727,
+      "total_cost_usd": 23.784639194107452,
+      "tokens_per_sec_phase3": 66407.58620926751,
+      "flops_per_token_phase3": 7148580864.0
+    },
+    "H200": {
+      "mfu_realistic": 0.52,
+      "phase_1_experts_h": 0.5,
+      "phase_2a_router_memory_composer_h": 0.1,
+      "phase_2b_encoder_h": 0.5,
+      "phase_3_joint_h": 4.818957275370299,
+      "phase_3_tokens": 1361634450,
+      "total_h": 5.9189572753703,
+      "total_d": 0.2466232198070958,
+      "total_cost_usd": 26.63530773916635,
+      "tokens_per_sec_phase3": 78488.30567554731,
+      "flops_per_token_phase3": 7148580864.0
+    }
+  },
+  "sensitivity_rtx_3090": [
+    {
+      "mfu": 0.12,
+      "tokens_per_sec": 1191.8449496607668,
+      "total_h": 334.052452194807
+    },
+    {
+      "mfu": 0.15,
+      "tokens_per_sec": 1489.8061870759584,
+      "total_h": 267.24196175584564
+    },
+    {
+      "mfu": 0.18,
+      "tokens_per_sec": 1787.76742449115,
+      "total_h": 222.70163479653803
+    },
+    {
+      "mfu": 0.22,
+      "tokens_per_sec": 2185.0490743780724,
+      "total_h": 182.2104284698947
+    },
+    {
+      "mfu": 0.25,
+      "tokens_per_sec": 2483.0103117932636,
+      "total_h": 160.3451770535074
+    },
+    {
+      "mfu": 0.3,
+      "tokens_per_sec": 2979.612374151917,
+      "total_h": 133.62098087792282
+    },
+    {
+      "mfu": 0.35,
+      "tokens_per_sec": 3476.2144365105687,
+      "total_h": 114.53226932393386
+    }
+  ],
+  "cognet_native_optimizations": {
+    "inapplicable": [
+      "FlashAttention (pas d'attention inter-token)",
+      "GQA / MQA (pas de multi-head attention)",
+      "KV-cache optimisations (slots SDPA, pas KV-cache)",
+      "Sliding-window attention (pas d'attention du tout)"
+    ],
+    "applicable": [
+      "Fused channel matmul (coh\u00e9rence + to_channels)",
+      "Memory tier batching (d\u00e9j\u00e0 fait dans source)",
+      "Working memory SRAM caching (H100/A100 only)",
+      "Triton kernel pour CompositionalReasoner",
+      "Sparse dispatch optimis\u00e9 pour le MoE",
+      "Gradient checkpointing (d\u00e9j\u00e0 fait)",
+      "PGSU (n_active=4/16)",
+      "bf16 + bitsandbytes 8-bit Adam",
+      "torch.compile (mode=reduce-overhead)",
+      "Batch packing"
+    ]
+  }
+}

@@ -1,0 +1,192 @@
+{
+  "char_tokenizer_legacy": {
+    "model": "CogNet-MoE-1B",
+    "tokenizer": "CharTokenizer (legacy, vocab=136)",
+    "vocab_size": 136,
+    "architecture": "Non-Transformer (CoherenceRouter O(n) + 3-tier Memory + CompositionalReasoner) + CogNet-native MoE (8 canaux = 8 experts FusedSwiGLU, top-2 sparse, routing = coherence O(n), PAS de gate transformer-style)",
+    "param_breakdown": {
+      "encoder_token_emb": 278528,
+      "encoder_norm": 2048,
+      "per_block_total": 448833536,
+      "per_block_cer_coherence": 32768,
+      "per_block_cer_to_channels": 33554432,
+      "per_block_cer_experts": 402669568,
+      "per_block_cer_norm": 2048,
+      "per_block_memory": 10997760,
+      "per_block_composer": 1574912,
+      "num_blocks": 16,
+      "n_experts_per_block": 8,
+      "top_k": 2,
+      "note": "Architecture CogNet-native MoE : 8 canaux = 8 experts (unifi\u00e9s). PAS de from_channels (somme pond\u00e9r\u00e9e mixe les canaux). PAS de moe_gate s\u00e9par\u00e9 (le coherence_router fait le routing O(n)). PAS de ChannelProcessor (supprim\u00e9, sa fonction absorb\u00e9e par les experts FusedSwiGLU)."
+    },
+    "totals": {
+      "total_params": 7181619200,
+      "active_params_per_token": 2349584384,
+      "capacity_multiplier": 3.0565487449204976,
+      "announced_in_readme": 1060000000,
+      "actual_dense_cognet": 2260000000
+    },
+    "chinchilla": {
+      "ratio": "20:1 sur active params (interpr\u00e9tation MoE correcte)",
+      "optimal_tokens": 46991687680,
+      "optimal_tokens_bpe_equivalent": 11747921920,
+      "wrong_interpretation_total_tokens": 143632384000,
+      "char_to_bpe_ratio": 4.0,
+      "optimal_tokens_in_chars_equivalent": 46991687680
+    },
+    "edt_scenarios": {
+      "scenario_a_aggressive": {
+        "tokens": 600000000,
+        "verdict": "TROP AGRESSIF \u2014 risque de sous-entra\u00eenement"
+      },
+      "scenario_b_full_chinchilla": {
+        "tokens": 46991687680,
+        "verdict": "INUTILE avec EDT \u2014 gaspille le b\u00e9n\u00e9fice EDT"
+      },
+      "scenario_c_edt_proportional_RECOMMENDED": {
+        "tokens": 1342619648,
+        "verdict": "RECOMMAND\u00c9 \u2014 Sc\u00e9nario C baseline",
+        "note": "Si qualit\u00e9 insuffisante, monter Phase 3 \u00e0 500M\u20131B tokens"
+      }
+    },
+    "comparison_standard_vs_edt": {
+      "standard": {
+        "tokens": 46991687680,
+        "time_h": 7405.159996695721,
+        "time_d": 308.54833319565506,
+        "cost": {
+          "gpu_hours": 7405.159996695721,
+          "cost_usd": 2962.0639986782885,
+          "gpu_hourly_cost": 0.4
+        }
+      },
+      "edt": {
+        "tokens_phase3": 1342619648,
+        "time_phase3_h": 211.57599990559206,
+        "time_phase12_h": 11.135578942399604,
+        "time_total_h": 222.71157884799166,
+        "time_total_d": 9.279649118666319,
+        "cost": {
+          "gpu_hours": 222.71157884799166,
+          "cost_usd": 89.08463153919666,
+          "gpu_hourly_cost": 0.4
+        }
+      },
+      "speedup": 33.24999999999999,
+      "cost_reduction": 33.24999999999999
+    },
+    "hardware": {
+      "gpu": "RTX 3090",
+      "memory_gb": 24.0,
+      "tflops_bf16": 71.0,
+      "assumed_mfu": 0.35,
+      "spot_hourly_cost_usd": 0.4
+    },
+    "caveats": [
+      "Hypoth\u00e8ses de vitesse (4 ms/expert-step, 678 tok/s joint) \u2014 varieront sur 3090 r\u00e9elle.",
+      "R\u00e9duction 35\u00d7 de tokens via EDT calqu\u00e9e sur document EDT original, NON valid\u00e9e empiriquement sur CogNet.",
+      "Avec BPE 16k : Phase 2b plus informative qu'avec CharTokenizer (reco #4 satisfaite).",
+      "Si routing collapse (max_load > 0.5), monter aux_loss_weight \u00e0 0.05.",
+      "Si VRAM Phase 3 saute, descendre PGSU n_active de 4 \u00e0 2."
+    ]
+  },
+  "bpe_tokenizer_proprietary": {
+    "model": "CogNet-MoE-1B",
+    "tokenizer": "CognetTokenizer BPE propri\u00e9taire (vocab=16,384)",
+    "vocab_size": 16384,
+    "architecture": "Non-Transformer (CoherenceRouter O(n) + 3-tier Memory + CompositionalReasoner) + CogNet-native MoE (8 canaux = 8 experts FusedSwiGLU, top-2 sparse, routing = coherence O(n), PAS de gate transformer-style)",
+    "param_breakdown": {
+      "encoder_token_emb": 33554432,
+      "encoder_norm": 2048,
+      "per_block_total": 448833536,
+      "per_block_cer_coherence": 32768,
+      "per_block_cer_to_channels": 33554432,
+      "per_block_cer_experts": 402669568,
+      "per_block_cer_norm": 2048,
+      "per_block_memory": 10997760,
+      "per_block_composer": 1574912,
+      "num_blocks": 16,
+      "n_experts_per_block": 8,
+      "top_k": 2,
+      "note": "Architecture CogNet-native MoE : 8 canaux = 8 experts (unifi\u00e9s). PAS de from_channels (somme pond\u00e9r\u00e9e mixe les canaux). PAS de moe_gate s\u00e9par\u00e9 (le coherence_router fait le routing O(n)). PAS de ChannelProcessor (supprim\u00e9, sa fonction absorb\u00e9e par les experts FusedSwiGLU)."
+    },
+    "totals": {
+      "total_params": 7214895104,
+      "active_params_per_token": 2382860288,
+      "capacity_multiplier": 3.0278296802938702,
+      "announced_in_readme": 1060000000,
+      "actual_dense_cognet": 2260000000
+    },
+    "chinchilla": {
+      "ratio": "20:1 sur active params (interpr\u00e9tation MoE correcte)",
+      "optimal_tokens": 47657205760,
+      "optimal_tokens_bpe_equivalent": 11914301440,
+      "wrong_interpretation_total_tokens": 144297902080,
+      "char_to_bpe_ratio": 4.0,
+      "optimal_tokens_in_chars_equivalent": 142971617280
+    },
+    "edt_scenarios": {
+      "scenario_a_aggressive": {
+        "tokens": 600000000,
+        "verdict": "TROP AGRESSIF \u2014 risque de sous-entra\u00eenement"
+      },
+      "scenario_b_full_chinchilla": {
+        "tokens": 47657205760,
+        "verdict": "INUTILE avec EDT \u2014 gaspille le b\u00e9n\u00e9fice EDT"
+      },
+      "scenario_c_edt_proportional_RECOMMENDED": {
+        "tokens": 1361634450,
+        "verdict": "RECOMMAND\u00c9 \u2014 Sc\u00e9nario C baseline",
+        "note": "Si qualit\u00e9 insuffisante, monter Phase 3 \u00e0 500M\u20131B tokens"
+      }
+    },
+    "comparison_standard_vs_edt": {
+      "standard": {
+        "tokens": 47657205760,
+        "time_h": 7616.395911639764,
+        "time_d": 317.3498296516568,
+        "cost": {
+          "gpu_hours": 7616.395911639764,
+          "cost_usd": 3046.5583646559057,
+          "gpu_hourly_cost": 0.4
+        }
+      },
+      "edt": {
+        "tokens_phase3": 1361634450,
+        "time_phase3_h": 217.61131171547433,
+        "time_phase12_h": 11.453226932393392,
+        "time_total_h": 229.06453864786772,
+        "time_total_d": 9.544355776994488,
+        "cost": {
+          "gpu_hours": 229.06453864786772,
+          "cost_usd": 91.62581545914709,
+          "gpu_hourly_cost": 0.4
+        }
+      },
+      "speedup": 33.250000006976904,
+      "cost_reduction": 33.25000000697691
+    },
+    "hardware": {
+      "gpu": "RTX 3090",
+      "memory_gb": 24.0,
+      "tflops_bf16": 71.0,
+      "assumed_mfu": 0.35,
+      "spot_hourly_cost_usd": 0.4
+    },
+    "caveats": [
+      "Hypoth\u00e8ses de vitesse (4 ms/expert-step, 678 tok/s joint) \u2014 varieront sur 3090 r\u00e9elle.",
+      "R\u00e9duction 35\u00d7 de tokens via EDT calqu\u00e9e sur document EDT original, NON valid\u00e9e empiriquement sur CogNet.",
+      "Avec BPE 16k : Phase 2b plus informative qu'avec CharTokenizer (reco #4 satisfaite).",
+      "Si routing collapse (max_load > 0.5), monter aux_loss_weight \u00e0 0.05.",
+      "Si VRAM Phase 3 saute, descendre PGSU n_active de 4 \u00e0 2."
+    ]
+  },
+  "deltas": {
+    "total_params_increase": 33275904,
+    "active_params_increase": 33275904,
+    "chinchilla_tokens_increase": 665518080,
+    "scenario_c_tokens_increase": 19014802,
+    "chars_of_text_data_char_scenario": 1342619648,
+    "chars_of_text_data_bpe_scenario": 4084903350
+  }
+}

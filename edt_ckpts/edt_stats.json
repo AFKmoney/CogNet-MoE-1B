@@ -1,0 +1,137 @@
+{
+  "phases": {
+    "phase1": {
+      "experts": [
+        {
+          "block": 0,
+          "expert": 0,
+          "final_loss": 0.8689595460891724,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 0,
+          "expert": 1,
+          "final_loss": 0.8759413957595825,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 0,
+          "expert": 2,
+          "final_loss": 0.8714421391487122,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 0,
+          "expert": 3,
+          "final_loss": 0.8722479343414307,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 1,
+          "expert": 0,
+          "final_loss": 0.8695600628852844,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 1,
+          "expert": 1,
+          "final_loss": 0.8653460741043091,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 1,
+          "expert": 2,
+          "final_loss": 0.8687983751296997,
+          "n_steps": 3,
+          "time_s": 0.0
+        },
+        {
+          "block": 1,
+          "expert": 3,
+          "final_loss": 0.8690539598464966,
+          "n_steps": 3,
+          "time_s": 0.0
+        }
+      ],
+      "total_time_s": 2.079131841659546,
+      "avg_loss": 0.8701686859130859
+    },
+    "phase2a": {
+      "losses": [
+        4.929632663726807
+      ],
+      "final_loss": 4.929632663726807,
+      "time_s": 0.0502469539642334
+    },
+    "phase2b": {
+      "losses": [
+        4.927914142608643,
+        4.918416976928711
+      ],
+      "final_loss": 4.918416976928711,
+      "avg_loss": 4.923165559768677,
+      "total_tokens": 512,
+      "time_s": 0.004465818405151367
+    },
+    "phase3": {
+      "losses": [
+        4.935623407363892,
+        4.9100470542907715
+      ],
+      "aux_losses": [
+        3.9997711181640625,
+        3.9998950958251953
+      ],
+      "max_loads": [
+        0.546875,
+        0.5390625
+      ],
+      "min_loads": [
+        0.421875,
+        0.4765625
+      ],
+      "final_loss": 4.9100470542907715,
+      "total_tokens": 512,
+      "time_s": 0.19769072532653809
+    }
+  },
+  "prerequisites": {
+    "top_k_lt_n_experts": {
+      "passed": true,
+      "details": "top_k=2 < n_experts=4 \u2192 OK"
+    },
+    "residuals_everywhere": {
+      "passed": true,
+      "details": "Modules avec r\u00e9siduel : ['FusedSwiGLU (experts/canaux)', 'CognitiveExpertRouter (r\u00e9siduel global)', 'ParallelHierarchicalMemory', 'CompositionalReasoner']"
+    },
+    "separable_embedding": {
+      "passed": true,
+      "details": "TokenEncoder pr\u00e9sent et isol\u00e9 : True"
+    },
+    "aux_losses_implemented": {
+      "passed": true,
+      "details": "aux_loss=4.0007, z_loss=0.0001"
+    },
+    "pgsu_valid": {
+      "passed": true,
+      "details": "Sera v\u00e9rifi\u00e9 \u00e0 l'instanciation de PGSU en Phase 3"
+    }
+  },
+  "total_time_s": 2.6456451416015625,
+  "total_time_h": 0.0007349014282226563,
+  "config": {
+    "phase1_steps": 3,
+    "phase2a_steps": 1,
+    "phase2b_tokens": 512,
+    "phase3_tokens": 512,
+    "pgsu_n_active": 1,
+    "use_bf16": false,
+    "use_8bit_optimizer": false
+  }
+}

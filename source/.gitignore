@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Model files
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Data
+data/
+*.json
+!configs/*.yaml
+
+# Logs
+logs/
+wandb/
+runs/
+*.log
+
+# Environment
+.env
+.env.local
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark results
+benchmark_results.json
