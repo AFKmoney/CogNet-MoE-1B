@@ -1,0 +1,32 @@
+{
+  "summary": {
+    "Phase 1 : experts \u2192 identit\u00e9": true,
+    "Phase 2b : embedding converge": true,
+    "Phase 3 : LM loss + routing": false,
+    "EDT > from-scratch": false,
+    "Experts se sp\u00e9cialisent": true
+  },
+  "passed": 3,
+  "total": 5,
+  "time_s": 797.5816206932068,
+  "model_config": {
+    "vocab_size": 136,
+    "hidden_dim": 128,
+    "num_blocks": 4,
+    "num_channels": 4,
+    "channel_dim": 32,
+    "ff_dim": 256,
+    "max_seq_len": 64,
+    "working_slots": 8,
+    "episodic_slots": 16,
+    "semantic_slots": 32,
+    "key_dim": 32,
+    "n_experts": 4,
+    "top_k": 2,
+    "dropout": 0.0,
+    "use_gradient_checkpointing": false
+  },
+  "phase1_steps": 200,
+  "phase2b_tokens": 100000,
+  "phase3_tokens": 100000
+}
