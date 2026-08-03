@@ -327,7 +327,8 @@ def test_phase3_convergence():
         phase1_steps_per_expert=50,
         phase1_batch_size=BATCH_SIZE,
         phase1_seq_len=SEQ_LEN,
-        phase2a_steps=1,
+        # Fix #2: 50 steps pour que le router apprenne à différencier les experts diversifiés.
+        phase2a_steps=50,
         phase2a_batch_size=BATCH_SIZE,
         phase2b_tokens=50_000,
         phase2b_batch_size=BATCH_SIZE,
@@ -338,7 +339,7 @@ def test_phase3_convergence():
         phase3_grad_accum=2,
         phase3_lr=1e-4,
         phase3_warmup_steps=10,
-        phase3_aux_loss_weight=0.01,
+        phase3_aux_loss_weight=0.05,  # Fix #3: 0.01→0.05 pour forcer utilisation tous experts
         phase3_z_loss_weight=1e-3,
         phase3_pgsu_n_active=2,
         use_bf16=False,
@@ -366,24 +367,38 @@ def test_phase3_convergence():
     loss_after = eval_after["lm_loss"]
     max_load_after = eval_after["max_load"]
 
-    # Analyser la stabilité du routing.
+    # Analyser la stabilité du routing avec seuil dynamique (Fix #3).
     max_loads = stats["max_loads"]
     min_loads = stats["min_loads"]
     avg_max_load = sum(max_loads) / len(max_loads) if max_loads else 0
     avg_min_load = sum(min_loads) / len(min_loads) if min_loads else 1
 
-    # Routing collapse : max_load > 0.5 de manière persistante.
-    collapse_steps = sum(1 for ml in max_loads if ml > 0.5)
+    # Fix #3 : seuil dynamique au lieu de 0.5 fixe.
+    # uniforme = top_k / n_experts ; seuil = 1.5 * uniforme
+    n_experts = VAL_MODEL_CFG["n_experts"]
+    top_k = VAL_MODEL_CFG["top_k"]
+    uniform_load = top_k / n_experts
+    collapse_threshold = 1.5 * uniform_load
+    # Fallback si stats contient déjà le threshold (nouveau edt_pipeline).
+    if "collapse_threshold" in stats:
+        collapse_threshold = stats["collapse_threshold"]
+        uniform_load = stats.get("uniform_load", uniform_load)
+
+    collapse_steps = sum(1 for ml in max_loads if ml > collapse_threshold)
     collapse_rate = collapse_steps / len(max_loads) if max_loads else 0
+    # Ancien taux avec seuil 0.5 pour comparaison (montre faux positifs).
+    old_collapse_steps = sum(1 for ml in max_loads if ml > 0.5)
+    old_collapse_rate = old_collapse_steps / len(max_loads) if max_loads else 0
 
     print(f"\n  ─── Résultats Phase 3 ───")
     print(f"  Loss LM avant Phase 3            : {loss_before:.4f}")
     print(f"  Loss LM après Phase 3            : {loss_after:.4f}")
     print(f"  Réduction loss                   : {loss_before - loss_after:.4f}")
     print(f"  Aux loss finale                  : {stats['aux_losses'][-1]:.4f}")
-    print(f"  Max load moyen                   : {avg_max_load:.3f}")
+    print(f"  Max load moyen                   : {avg_max_load:.3f} (thr={collapse_threshold:.3f})")
     print(f"  Min load moyen                   : {avg_min_load:.3f}")
-    print(f"  Taux routing collapse (>0.5)     : {collapse_rate:.1%}")
+    print(f"  Taux routing collapse (thr={collapse_threshold:.3f}) : {collapse_rate:.1%}")
+    print(f"  (Ancien seuil 0.5 → {old_collapse_rate:.1%} — faux positifs C=4/top2)")
 
     loss_decreased = loss_after < loss_before - 0.05
     routing_stable = collapse_rate < 0.5  # moins de 50% des steps en collapse
@@ -430,7 +445,7 @@ def test_edt_vs_from_scratch():
         phase3_grad_accum=2,
         phase3_lr=3e-4,                 # LR plus haute (from scratch)
         phase3_warmup_steps=50,
-        phase3_aux_loss_weight=0.01,
+        phase3_aux_loss_weight=0.05,    # aligné avec fix #3 pour comparaison fair
         phase3_z_loss_weight=1e-3,
         phase3_pgsu_n_active=2,
         use_bf16=False,
@@ -453,7 +468,7 @@ def test_edt_vs_from_scratch():
         phase1_steps_per_expert=50,
         phase1_batch_size=BATCH_SIZE,
         phase1_seq_len=SEQ_LEN,
-        phase2a_steps=1,
+        phase2a_steps=50,  # Fix #2
         phase2a_batch_size=BATCH_SIZE,
         phase2b_tokens=PHASE2B_TOKENS // 2,
         phase2b_batch_size=BATCH_SIZE,
@@ -464,7 +479,7 @@ def test_edt_vs_from_scratch():
         phase3_grad_accum=2,
         phase3_lr=1e-4,
         phase3_warmup_steps=10,
-        phase3_aux_loss_weight=0.01,
+        phase3_aux_loss_weight=0.05,  # Fix #3
         phase3_z_loss_weight=1e-3,
         phase3_pgsu_n_active=2,
         use_bf16=False,
@@ -521,12 +536,12 @@ def test_expert_specialization():
     # Mesurer diversité initiale (avant EDT).
     diversity_before = track_expert_diversity(model)
 
-    # EDT partiel (Phase 1 + Phase 3).
+    # EDT partiel (Phase 1 + Phase 3) avec fixes.
     cfg = EDTConfig(
         phase1_steps_per_expert=100,
         phase1_batch_size=BATCH_SIZE,
         phase1_seq_len=SEQ_LEN,
-        phase2a_steps=1,
+        phase2a_steps=50,  # Fix #2: 50 steps
         phase2a_batch_size=BATCH_SIZE,
         phase2b_tokens=50_000,
         phase2b_batch_size=BATCH_SIZE,
@@ -536,6 +551,7 @@ def test_expert_specialization():
         phase3_seq_len=SEQ_LEN,
         phase3_grad_accum=2,
         phase3_pgsu_n_active=2,
+        phase3_aux_loss_weight=0.05,  # Fix #3
         use_bf16=False,
         use_8bit_optimizer=False,
         device="cpu",

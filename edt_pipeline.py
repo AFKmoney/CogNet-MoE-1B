@@ -37,11 +37,20 @@ Adaptations CogNet-MoE-1B vs document EDT original :
 
 Hypothèses de vitesse (à valider empiriquement sur 3090) :
   - Phase 1 : ~4 ms / expert-step × 2000 steps × 128 experts / parallélisme GPU
-              ≈ 1,2 h (si 8 experts en parallèle par bloc).
-  - Phase 2a : < 1 s (1 step × 16 blocs × petits modules).
+              ≈ 1,2 h (si 8 experts en parallèle par bloc). Avec perturbation
+              multiplicative, convergence similaire mais diversité préservée.
+  - Phase 2a : ~50 steps × 32 batch ≈ 1-2 min (was <1s à 1 step, insuffisant
+              pour CoherenceRouter — fix EDT #2).
   - Phase 2b : ~3,2 h (500M chars, embedding-only forward).
-  - Phase 3 : ~41 h (100M chars joint fine-tune, PGSU n_active=4).
+  - Phase 3 : ~41 h (100M chars joint fine-tune, PGSU n_active=4, aux_w=0.05).
   - Total : ~45 h = ~1,9 jour (vs ~358 jours pour entraînement standard).
+
+Fixes EDT appliqués (cf. EDT_VALIDATION_REPORT.md) :
+  - Fix #1 : perturbation multiplicative/additive unique par expert en Phase 1
+    (target = h_in * (1 + mult_e) + add_e) pour éviter collapse comportemental.
+  - Fix #2 : Phase 2a étendue 1→50 steps pour symmetry break du router.
+  - Fix #3 : aux_loss_weight 0.01→0.05 + seuil collapse dynamique (1.5*top_k/C).
+  - Fix #4 : logging de la diversité comportementale (variance des sorties).
 
 NOTE CRITIQUE : la réduction 35× de tokens via EDT est calquée sur le document
 EDT original. Elle n'a pas encore été validée empiriquement sur CogNet. À
@@ -79,9 +88,18 @@ class EDTConfig:
     phase1_seq_len: int = 512                 # seq len pour générer les hidden states
     phase1_lr: float = 3e-4
     phase1_target_loss: float = 0.05          # MSE target avant arrêt anticipé
+    # Fix EDT #1 : perturbation multiplicative unique par expert pour
+    # préserver la diversité comportementale (évite que tous les experts
+    # convergent vers la même identité f(x)=x, ce qui tue le routing).
+    phase1_perturbation_scale: float = 0.02   # scale de la perturbation (2%)
+    phase1_perturbation_mode: str = "both"    # "additive" | "multiplicative" | "both"
+    phase1_use_perturbation: bool = True      # active la diversité par expert
 
     # ─── Phase 2a : routers + memory + composer ──────────────────────
-    phase2a_steps: int = 1                    # 1 step suffit (symmetry break)
+    # Fix EDT #2 : 1 step ne suffit pas pour CoherenceRouter (trop peu
+    # expressif). Étendu à 50 steps pour que le router apprenne à différencier
+    # les experts avant Phase 3 (cf. EDT_VALIDATION_REPORT.md Problème 1).
+    phase2a_steps: int = 50                   # 50 steps (was 1, insuffisant)
     phase2a_batch_size: int = 32
     phase2a_lr: float = 3e-4
 
@@ -98,7 +116,7 @@ class EDTConfig:
     phase3_grad_accum: int = 8                # effective batch = 32
     phase3_lr: float = 1e-4
     phase3_warmup_steps: int = 200
-    phase3_aux_loss_weight: float = 0.01      # monter à 0.05 si routing collapse
+    phase3_aux_loss_weight: float = 0.05      # 0.05 (was 0.01) — force l'utilisation de tous les experts
     phase3_z_loss_weight: float = 1e-3
     # Aux-loss clamping (mentionné dans le doc EDT original).
     # Clamp l'aux_loss à une valeur max pour éviter qu'elle explose et
@@ -151,6 +169,49 @@ def _autocast_context(use_bf16: bool, device: str):
     return torch.amp.autocast('cuda' if 'cuda' in device else 'cpu', dtype=torch.bfloat16)
 
 
+def _get_expert_perturbation(
+    block_idx: int,
+    expert_idx: int,
+    hidden_dim: int,
+    device: torch.device,
+    scale: float,
+    mode: str,
+    seed: int,
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    Génère une perturbation unique et déterministe par expert.
+
+    Fix #1 — évite que tous les experts convergent vers la même fonction
+    identité f(x)=x, ce qui rend le router incapable de les différencier
+    (cause racine du ×2.4 EDT vs from-scratch observé en validation).
+
+    Modes :
+      - multiplicative : h_target = h_in * (1 + mult_e) où mult_e ~ U(-scale, scale)
+      - additive       : h_target = h_in + add_e
+      - both           : h_target = h_in * (1 + mult_e) + add_e  (recommandé)
+
+    La perturbation est fixe par expert (seed = base + block*100 + expert)
+    pour reproductibilité et logging de diversité.
+    """
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed + block_idx * 100 + expert_idx * 17)
+
+    mult = None
+    add = None
+
+    if mode in ("multiplicative", "both"):
+        # Vectoriel par hidden dim pour diversité maximale.
+        mult = (torch.rand(hidden_dim, generator=gen) * 2 - 1) * scale
+        mult = mult.to(device)
+
+    if mode in ("additive", "both"):
+        # Additive plus petite (50% de scale) pour ne pas casser l'identité.
+        add = (torch.rand(hidden_dim, generator=gen) * 2 - 1) * scale * 0.5
+        add = add.to(device)
+
+    return mult, add
+
+
 def _cleanup():
     """Force GC + cache CUDA entre phases."""
     gc.collect()
@@ -191,12 +252,14 @@ def phase1_experts(
         dict avec stats par expert (loss finale, n_steps, temps)
     """
     print("\n" + "=" * 70)
-    print("EDT Phase 1 — Pré-entraînement des 128 experts")
+    print("EDT Phase 1 — Pré-entraînement des 128 experts (avec diversité)")
     print("=" * 70)
     print(f"  Steps/expert : {cfg.phase1_steps_per_expert}")
     print(f"  Batch size   : {cfg.phase1_batch_size}")
     print(f"  LR           : {cfg.phase1_lr}")
     print(f"  Target MSE   : {cfg.phase1_target_loss}")
+    print(f"  Perturbation : {cfg.phase1_use_perturbation} "
+          f"mode={cfg.phase1_perturbation_mode} scale={cfg.phase1_perturbation_scale}")
 
     device = cfg.device if torch.cuda.is_available() else "cpu"
     model = model.to(device)
@@ -204,7 +267,7 @@ def phase1_experts(
 
     n_blocks = model.num_blocks
     n_experts = model.n_experts
-    stats: Dict = {"experts": [], "total_time_s": 0.0}
+    stats: Dict = {"experts": [], "total_time_s": 0.0, "behavioral_diversity": []}
 
     t_start = time.time()
 
@@ -226,6 +289,24 @@ def phase1_experts(
                 cfg=cfg,
             )
 
+            # ─── Perturbation unique par expert (Fix #1) ───────────────
+            mult_e, add_e = (None, None)
+            if cfg.phase1_use_perturbation:
+                mult_e, add_e = _get_expert_perturbation(
+                    block_idx=b,
+                    expert_idx=e,
+                    hidden_dim=model.hidden_dim,
+                    device=torch.device(device),
+                    scale=cfg.phase1_perturbation_scale,
+                    mode=cfg.phase1_perturbation_mode,
+                    seed=cfg.seed,
+                )
+                # Log diversité : norme de la perturbation = signal de différenciation.
+                if b == 0 and e < 2:
+                    m_norm = mult_e.norm().item() if mult_e is not None else 0
+                    a_norm = add_e.norm().item() if add_e is not None else 0
+                    print(f"  [B{b:02d}E{e}] perturbation: mult_norm={m_norm:.4f} add_norm={a_norm:.4f}")
+
             expert_losses = []
             for step in range(cfg.phase1_steps_per_expert):
                 # Hidden states réels (le reste du modèle est frozen).
@@ -237,11 +318,21 @@ def phase1_experts(
                 opt.zero_grad()
                 h_out = expert(h_in)
 
-                # Target : identité (résiduel zéro) — bonne init pour EDT.
-                # L'expert apprend à préserver l'information tout en étant
-                # capable d'ajouter des corrections non-linéaires via le
-                # SwiGLU interne. La loss MSE(h_out, h_in) pousse vers identité.
-                loss = F.mse_loss(h_out, h_in)
+                # Target : identité + perturbation unique par expert (Fix #1)
+                # h_target = h_in * (1 + mult_e) + add_e
+                # Sans perturbation, tous les experts convergent vers f(x)=x
+                # → comportement indistinguable → routing collapse en Phase 3.
+                if cfg.phase1_use_perturbation and (mult_e is not None or add_e is not None):
+                    h_target = h_in
+                    if mult_e is not None:
+                        # mult_e shape (D,) → broadcast sur (B,T,D)
+                        h_target = h_target * (1.0 + mult_e)
+                    if add_e is not None:
+                        h_target = h_target + add_e
+                else:
+                    h_target = h_in
+
+                loss = F.mse_loss(h_out, h_target)
 
                 loss.backward()
                 opt.step()
@@ -261,11 +352,38 @@ def phase1_experts(
                 "final_loss": expert_losses[-1],
                 "n_steps": len(expert_losses),
                 "time_s": 0.0,  # mesuré globalement pour ne pas fausser
+                "perturbation_mult_norm": mult_e.norm().item() if mult_e is not None else 0.0,
+                "perturbation_add_norm": add_e.norm().item() if add_e is not None else 0.0,
             })
 
             # Re-freeze cet expert avant de passer au suivant.
             for p in expert.parameters():
                 p.requires_grad = False
+
+    # ─── Logging diversité comportementale (Fix #4) ──────────────────
+    # Mesure variance des sorties experts sur un batch test (pas juste poids).
+    try:
+        with torch.no_grad():
+            h_test = data_iter_fn(cfg.phase1_batch_size, cfg.phase1_seq_len).to(device).float()
+            # Forward jusqu'au bloc 0 via memory+composer (sans MoE) pour réalisme.
+            # Simplifié : on prend h_test direct comme hidden state.
+            expert_outputs = []
+            for e_idx in range(min(n_experts, 4)):
+                ex = model.get_expert(0, e_idx)
+                ex.eval()
+                out = ex(h_test)
+                expert_outputs.append(out)
+                ex.train()
+            # Variance entre experts.
+            stacked = torch.stack(expert_outputs)  # (E,B,T,D)
+            mean_out = stacked.mean(dim=0)
+            var_out = ((stacked - mean_out) ** 2).mean().item()
+            stats["behavioral_diversity"] = {"block0_var_across_experts": var_out}
+            print(f"  Diversité comportementale (var sorties block0) : {var_out:.6f}")
+            print(f"  (Plus grand = experts plus différenciés, évite routing collapse)")
+    except Exception as ex:
+        print(f"  [Phase1] diversité logging failed: {ex}")
+        stats["behavioral_diversity"] = {"error": str(ex)}
 
     total_time = time.time() - t_start
     stats["total_time_s"] = total_time
@@ -274,6 +392,8 @@ def phase1_experts(
     print(f"\n  Phase 1 terminée en {total_time:.1f}s "
           f"({total_time / 3600:.2f}h)")
     print(f"  Loss moyenne finale : {stats['avg_loss']:.4f}")
+    if stats["behavioral_diversity"]:
+        print(f"  Diversité finale : {stats['behavioral_diversity']}")
 
     # Restore grad state pour phases suivantes.
     for p in model.parameters():
@@ -304,9 +424,11 @@ def phase2a_attention(
 
     Tous les experts sont frozen (Phase 1 les a initialisés).
 
-    Comme dans le document EDT original, 1 step suffit pour break la symmetry
-    (les modules sont initialisés aléatoirement, un seul gradient step les
-    place dans une région non-triviale de l'espace de paramètres).
+    EDT original disait « 1 step suffit pour break la symmetry ». En pratique
+    sur CogNet-MoE (CoherenceRouter peu expressif + gros experts perturbés),
+    1 step est insuffisant : le router n'a pas le temps de différencier les
+    experts diversifiés de Phase 1. Fix #2 étend à 50 steps pour que le router
+    apprenne un vrai signal de routing avant Phase 3.
 
     Args:
         model: CogNet-MoE-1B (avec experts déjà pré-entraînés)
@@ -316,9 +438,12 @@ def phase2a_attention(
         dict avec stats
     """
     print("\n" + "=" * 70)
-    print("EDT Phase 2a — Pré-entraînement routers + memory + composer")
+    print("EDT Phase 2a — Pré-entraînement routers + memory + composer (50 steps)")
     print("=" * 70)
-    print(f"  Steps : {cfg.phase2a_steps} (1 step suffit pour symmetry break)")
+    print(f"  Steps : {cfg.phase2a_steps} (Fix #2: was 1, now 50 pour router learning)")
+    print(f"  Batch : {cfg.phase2a_batch_size}  LR: {cfg.phase2a_lr}")
+    if cfg.phase2a_steps <= 1:
+        print(f"  ⚠️  Attention: phase2a_steps={cfg.phase2a_steps} trop faible (recommandé >=50)")
 
     device = cfg.device if torch.cuda.is_available() else "cpu"
     model = model.to(device)
@@ -381,10 +506,14 @@ def phase2a_attention(
         loss.backward()
         opt.step()
         losses.append(loss.item())
-        print(f"  Step {step+1}/{cfg.phase2a_steps}  loss={loss.item():.4f}")
+        if (step + 1) % max(1, cfg.log_every // 5) == 0 or step == 0 or step == cfg.phase2a_steps - 1:
+            print(f"  Step {step+1}/{cfg.phase2a_steps}  loss={loss.item():.4f}")
 
     elapsed = time.time() - t_start
-    print(f"\n  Phase 2a terminée en {elapsed:.2f}s (< 1s attendu)")
+    avg_loss = sum(losses) / len(losses) if losses else 0
+    print(f"\n  Phase 2a terminée en {elapsed:.2f}s "
+          f"({elapsed/60:.1f} min attendu pour 50 steps)")
+    print(f"  Loss moyenne : {avg_loss:.4f} (final {losses[-1]:.4f})")
 
     # Restore grad state pour Phase 2b/3.
     for p in model.parameters():
@@ -614,6 +743,17 @@ def phase3_joint(
     model = model.to(device)
     model.train()
 
+    # Fix #3 : seuil collapse dynamique (au lieu de hardcodé 0.5).
+    # Pour C experts, top_k : uniforme = top_k / C.
+    # Seuil collapse = 1.5 * uniforme (50% au-dessus de l'uniforme).
+    # Ex: C=4/top2 → 0.5 uniforme → seuil 0.75 ; C=8/top2 → 0.25 → seuil 0.375
+    # L'ancien seuil 0.5 donnait 100% faux positifs avec C=4/top2.
+    uniform_load = model.top_k / model.n_experts
+    collapse_threshold = 1.5 * uniform_load
+    print(f"  Collapse threshold dynamique: {collapse_threshold:.3f} "
+          f"(uniforme={uniform_load:.3f} pour C={model.n_experts}/top{model.top_k})")
+    print(f"  (Ancien seuil fixe 0.5 → faux positifs C=4/top2)")
+
     pgsu = PGSU(
         n_layers=model.num_blocks,
         n_active=cfg.phase3_pgsu_n_active,
@@ -681,10 +821,6 @@ def phase3_joint(
                 z_loss = result["moe_z_loss"]
 
                 # ─── Aux-loss clamping (mentionné dans le doc EDT original) ───
-                # Clamp les aux losses à une valeur max pour éviter qu'elles
-                # n'explosent et ne déstabilisent le LM loss. Particulièrement
-                # important en début d'entraînement quand le router n'est pas
-                # encore équilibré.
                 aux_loss = aux_loss.clamp(max=cfg.phase3_aux_loss_clamp)
                 z_loss = z_loss.clamp(max=cfg.phase3_z_loss_clamp)
 
@@ -699,8 +835,7 @@ def phase3_joint(
             accum_loss += lm_loss.item()
             accum_aux += aux_loss.item()
 
-            # Monitoring routing collapse (reco #2 du reviewer).
-            # Si max_load > 0.5 -> routing collapse -> monter aux_loss_weight.
+            # Monitoring routing collapse avec seuil dynamique (Fix #3).
             block0_stats = result["stats"]
             if "block0_moe_max_load" in block0_stats:
                 accum_max_load = max(accum_max_load, block0_stats["block0_moe_max_load"].item())
@@ -728,22 +863,30 @@ def phase3_joint(
             print(
                 f"  Step {step:5d}  tokens={total_tokens/1e6:.1f}M  "
                 f"loss={losses[-1]:.4f}  aux={aux_losses[-1]:.4f}  "
-                f"max_load={accum_max_load:.3f}  "
+                f"max_load={accum_max_load:.3f} (thr={collapse_threshold:.3f})  "
                 f"tps={tps:.0f}  ETA={eta_s/3600:.1f}h  "
                 f"active={active_layers}"
             )
 
-            # Alerte routing collapse.
-            if accum_max_load > 0.5:
-                print(f"  ⚠️  ROUTING COLLAPSE DÉTECTÉ (max_load={accum_max_load:.3f} > 0.5)")
-                print(f"      -> monter phase3_aux_loss_weight à 0.05")
+            # Alerte routing collapse avec seuil dynamique.
+            if accum_max_load > collapse_threshold:
+                print(f"  ⚠️  ROUTING COLLAPSE DÉTECTÉ "
+                      f"(max_load={accum_max_load:.3f} > thr={collapse_threshold:.3f})")
+                print(f"      Config C={model.n_experts}/top{model.top_k} "
+                      f"uniforme={uniform_load:.3f}")
+                if cfg.phase3_aux_loss_weight < 0.1:
+                    print(f"      -> considérer monter aux_loss_weight "
+                          f"(actuel {cfg.phase3_aux_loss_weight})")
 
     elapsed = time.time() - t_start
+    collapse_rate = sum(1 for ml in max_loads if ml > collapse_threshold) / len(max_loads) if max_loads else 0
     print(f"\n  Phase 3 terminée en {elapsed:.1f}s ({elapsed/3600:.2f}h)")
     print(f"  Loss LM finale   : {losses[-1]:.4f}")
     print(f"  Aux loss finale  : {aux_losses[-1]:.4f}")
-    print(f"  Max load moyen   : {sum(max_loads)/len(max_loads):.3f}")
+    print(f"  Max load moyen   : {sum(max_loads)/len(max_loads):.3f} (thr={collapse_threshold:.3f})")
     print(f"  Min load moyen   : {sum(min_loads)/len(min_loads):.3f}")
+    print(f"  Collapse rate    : {collapse_rate:.1%} (vs ancien seuil 0.5: "
+          f"{sum(1 for ml in max_loads if ml > 0.5)/len(max_loads) if max_loads else 0:.1%})")
 
     _cleanup()
     return {
@@ -754,6 +897,8 @@ def phase3_joint(
         "final_loss": losses[-1],
         "total_tokens": total_tokens,
         "time_s": elapsed,
+        "collapse_threshold": collapse_threshold,
+        "uniform_load": uniform_load,
     }
 
 
