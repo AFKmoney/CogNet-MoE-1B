@@ -119,7 +119,7 @@ class EDTConfig:
 
     # ─── Logging ─────────────────────────────────────────────────────
     log_every: int = 50
-    ckpt_dir: str = "/home/z/my-project/cognet-moe/edt_ckpts"
+    ckpt_dir: str = "./edt_ckpts"
 
 
 # ═══════════════════════════════════════════════════════════════════════
