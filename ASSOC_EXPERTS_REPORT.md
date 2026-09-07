@@ -156,6 +156,27 @@ Limites honnêtes : +0.015 vs identité (seed-0) — les experts restent margina
 cartes plein-rang (4k params/slot, rang faible requis à l'échelle) ; 4× plus lent
 que dense (20k MACs/token — Hamming arrive §10). v4 candidate : slots MLP locaux.
 
+## 10. Binaire — Hypervecteurs d'adressage (Hamming, ÷32, qualité neutre)
+
+Ordre respecté : v3 a défini QUOI binariser — l'adressage seul (clés, proj).
+Forward binaire (XOR + popcount int64, CPU-natif), ombre flottante latente pour
+le Hebb (style BNN), proj ±1 (Achlioptas, additions seules). Readout (v, A, c)
+intact : la binarisation ne touche jamais la fonction apprise.
+
+| Mesure (D=64) | Résultat |
+|---|---|
+| Adressage disque | 18 432 B → 576 B = **÷32.0** |
+| Page v3 totale (amaps dominent) | 155 680 → 137 824 B (−11.5 %, honnête) |
+| Reload binaire (bits seuls) | **Δ 0.0000, cos 1.0** — bit-exact (le retrieval ne lit que les signes) |
+| Convergence clustering | 0.068 vs 0.057 float (τ-insensible) |
+| **3 seeds BIN-V3 vs float** | **2.8848 vs 2.8820 (+0.003)** — qualité neutre |
+
+Honnête sur le calcul : Hamming ≈ dot en eager CPU tiny (0.80× — pack requête
+multi-passes vs BLAS fusé) ; le gain ALU réel demande des kernels fusés et croît
+avec D (travail production identifié, pas faké). Le gain v1 = mémoire + résidence
+cache (clés 2 Ko → 64 o par page, tient en L1) + repli exact. Cache `keys_bits`
+par slot (repack au Hebb uniquement) : pas de repack au retrieval.
+
 ## 7. Usage
 
 ```bash

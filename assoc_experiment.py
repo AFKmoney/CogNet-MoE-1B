@@ -133,7 +133,8 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
 
 def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
             n_mem_slots=8, window=4, bind_alpha=0.0, vigilance=0.0, mode="token",
-            novelty_gamma=0.0, readout="legacy", eta=0.05, delta_blocks="all"):
+            novelty_gamma=0.0, readout="legacy", eta=0.05, delta_blocks="all",
+            binary=False):
     t0 = time.time()
     counter = TokenCounter()
     pattern = make_pattern(pattern_seed)
@@ -146,7 +147,8 @@ def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
     if kind == "ASSOC":
         pager = ExpertPager(PagerConfig(store_dir=f"/tmp/assoc_exp_{seed}", num_loaders=4))
         model = convert_to_assoc(trunk, n_slots=2, pager=pager, n_mem_slots=n_mem_slots,
-                                 window=window, seed=seed, n_labels=VPROBE, mode=mode)
+                                 window=window, seed=seed, n_labels=VPROBE, mode=mode,
+                                 binary_addressing=binary)
     else:
         model = convert_to_hash(trunk, mode="token")
     ntrain = sum(p.numel() for p in list(model.parameters()) + list(head.parameters())
@@ -210,12 +212,8 @@ def ablate():
     print("=" * 70)
     print("Ablation seed-0 : M/W × binding label (200k tokens chacun)")
     print("=" * 70)
-    for tag, kw in [("last-eta.1", {"readout": "delta", "delta_blocks": "last",
-                                   "eta": 0.1}),
-                    ("last-M16W8", {"readout": "delta", "delta_blocks": "last",
-                                    "n_mem_slots": 16, "window": 8}),
-                    ("hybrid", {"readout": "delta", "delta_blocks": "hybrid",
-                                "bind_alpha": 0.5, "novelty_gamma": 2.0})]:
+    for tag, kw in [("bin-v3", {"readout": "delta", "delta_blocks": "last",
+                               "eta": 0.1, "binary": True})]:
         a = run_arm("ASSOC", 0, TOKENS, **kw)
         p = a["pager"]
         print(f"  {tag:12s}: eval={a['eval']:.4f} tok/s={a['tok_s']:.0f} "

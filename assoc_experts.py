@@ -99,6 +99,48 @@ def assoc_address_lsh(code: torch.Tensor, hasher: LSHHasher, n_experts: int,
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Hypervecteurs binaires : adressage Hamming (clés+proj), readout float
+# ═══════════════════════════════════════════════════════════════════════
+# La phase v3 a défini QUOI binariser : l'adressage seul (clés, proj).
+# Forward binaire (XOR + popcount, CPU-natif), ombre flottante latente pour
+# l'apprentissage Hebbien (philosophie BNN). Les valeurs/cartes/centres
+# (readout expressif) restent float/int8 : la binarisation ne touche jamais
+# la fonction apprise, seulement son adressage. ÷32 sur clés+proj.
+
+def _popcount64(x: torch.Tensor) -> torch.Tensor:
+    """Popcount vectorisé int64 (6 ops bit-à-bit, constantes < 2^63)."""
+    x = x - ((x >> 1) & 0x5555555555555555)
+    x = (x & 0x3333333333333333) + ((x >> 2) & 0x3333333333333333)
+    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0F
+    return (x * 0x0101010101010101) >> 56
+
+
+def pack_bits(signs: torch.Tensor) -> torch.Tensor:
+    """(..., D) {0,1} → (..., nwords) int64 (pad-0 neutre pour XOR)."""
+    D = signs.shape[-1]
+    nw = max(1, (D + 63) // 64)
+    pad = nw * 64 - D
+    if pad:
+        signs = torch.cat([signs, torch.zeros(signs.shape[:-1] + (pad,),
+                                              dtype=signs.dtype, device=signs.device)], dim=-1)
+    w = signs.long().reshape(signs.shape[:-1] + (nw, 64))
+    shifts = torch.arange(64, device=signs.device, dtype=torch.int64)
+    return (w << shifts).sum(-1).to(torch.int64)
+
+
+def unpack_bits(packed: torch.Tensor, dim: int) -> torch.Tensor:
+    """(..., nwords) int64 → (..., dim) float {−1,+1} (ombre à ±1)."""
+    shifts = torch.arange(64, device=packed.device, dtype=torch.int64)
+    bits = ((packed.unsqueeze(-1) >> shifts) & 1).reshape(packed.shape[:-1] + (-1,))
+    return bits[..., :dim].float() * 2.0 - 1.0
+
+
+def hamming_dist(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """popcount(a^b) sommé sur les mots : (...,nwords) → (...) distances."""
+    return _popcount64(a ^ b).sum(-1)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Cœur associatif : retrieval + superposition Hebbienne (fonctions pures)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -110,7 +152,9 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
                    label_hist: Optional[torch.Tensor] = None,
                    rho: float = 0.5, commit_min: int = 3,
                    amaps: Optional[torch.Tensor] = None,
-                   centers: Optional[torch.Tensor] = None):
+                   centers: Optional[torch.Tensor] = None,
+                   binary: bool = False, tau: float = 8.0,
+                   keys_bits: Optional[torch.Tensor] = None):
     """
     q (N,D) → out (N,D) + poids (N,W) + gagnants (N,) + codes z (N,D) + replis.
     Readout v3 : o_s = v_s + A_s(q−c_s) (cartes locales, None = lookup pur).
@@ -125,11 +169,18 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
     N, D = q.shape
     M = keys.shape[0]
     W = min(window, M)
-    z = q.float() @ proj.float().T  # random indexing fixe
+    z = q.float() @ proj.float().T  # random indexing fixe (±1 si binaire)
     steps = torch.arange(W, device=q.device)
     idx = (win_start.unsqueeze(-1) + steps) % M  # (N,W) circulaire
-    k = keys.float()[idx]  # (N,W,D)
-    scores = (z.unsqueeze(1) * k).sum(-1) / math.sqrt(D)
+    if binary:  # adressage Hamming : XOR + popcount (z float gardé pour Hebb)
+        zb = pack_bits((z > 0).to(torch.int64))  # (N,nw)
+        kb = (keys_bits if keys_bits is not None
+              else pack_bits((keys.float() > 0).to(torch.int64)))[idx]  # (N,W,nw)
+        dist = hamming_dist(zb.unsqueeze(1), kb).float()  # (N,W)
+        scores = -dist / tau
+    else:
+        k = keys.float()[idx]  # (N,W,D)
+        scores = (z.unsqueeze(1) * k).sum(-1) / math.sqrt(D)
     w = torch.softmax(scores, -1).to(q.dtype)
     v = values.float()[idx]  # (N,W,D)
     if amaps is not None and centers is not None:  # cartes locales v3
@@ -246,7 +297,9 @@ class AssocSlot(nn.Module):
 
     def __init__(self, hidden_dim: int, n_mem_slots: int, n_labels: int = 64):
         super().__init__()
+        nw = max(1, (hidden_dim + 63) // 64)
         self.register_buffer("keys", torch.zeros(n_mem_slots, hidden_dim))
+        self.register_buffer("keys_bits", torch.zeros(n_mem_slots, nw, dtype=torch.int64))
         self.register_buffer("values", torch.zeros(n_mem_slots, hidden_dim))
         self.register_buffer("counts", torch.zeros(n_mem_slots))
         self.register_buffer("proj", torch.zeros(hidden_dim, hidden_dim))
@@ -271,7 +324,8 @@ class PagedAssocExpertRouter(nn.Module):
                  salt: int = 0x9E3779B9,
                  frozen_pages: Optional[Set[int]] = None,
                  n_labels: int = 64, mode: str = "token",
-                 n_bits: int = 24, lsh_seed: int = 1234):
+                 n_bits: int = 24, lsh_seed: int = 1234,
+                 binary_addressing: bool = False, binary_tau: float = 8.0):
         super().__init__()
         assert top_k <= n_experts
         assert mode in ("token", "lsh")
@@ -296,6 +350,8 @@ class PagedAssocExpertRouter(nn.Module):
         self.aux_loss_weight = 0.0
         self.z_loss_weight = 0.0
         self._batch_token_ids: Optional[torch.Tensor] = None
+        self.binary_addressing = binary_addressing
+        self.binary_tau = binary_tau
         self._batch_labels: Optional[torch.Tensor] = None
         self._rho = 0.5
         self._last = None
@@ -312,21 +368,37 @@ class PagedAssocExpertRouter(nn.Module):
         for e in range(self.n_experts):
             g = torch.Generator().manual_seed(seed + self.block_idx * 100003 + e * 1013)
             keys = F.normalize(torch.randn(M, D, generator=g), dim=-1)
-            sd = {"keys": keys,
-                  "values": torch.zeros(M, D),   # démarrage froid = sortie nulle
-                  "counts": torch.zeros(M),
-                  "proj": torch.randn(D, D, generator=g) / math.sqrt(D),
-                  "label_hist": torch.zeros(M, self.n_labels, dtype=torch.int32),
-                  "amaps": torch.zeros(M, D, D),  # cartes nulles = lookup pur
-                  "centers": torch.zeros(M, D)}
+            if self.binary_addressing:  # Achlioptas ±1 : projection sans mults
+                proj = torch.sign(torch.randn(D, D, generator=g))
+                proj[proj == 0] = 1.0
+                kb = pack_bits((keys > 0).to(torch.int64))
+                pb = pack_bits((proj > 0).to(torch.int64))
+                sd = {"keys_bits": kb, "proj_bits": pb}
+            else:
+                proj = torch.randn(D, D, generator=g) / math.sqrt(D)
+                sd = {"keys": keys, "proj": proj}
+            sd.update({"values": torch.zeros(M, D),  # démarrage froid = sortie nulle
+                       "counts": torch.zeros(M),
+                       "label_hist": torch.zeros(M, self.n_labels, dtype=torch.int32),
+                       "amaps": torch.zeros(M, D, D),  # cartes nulles = lookup pur
+                       "centers": torch.zeros(M, D)})
             pager.store.save_page(self.block_idx, e, sd)
 
     def install_page(self, page: PageId, sd: Dict[str, torch.Tensor], slot: int):
         s = self.slots[slot]
-        s.keys.copy_(sd["keys"].to(s.keys.dtype))
+        D = self.hidden_dim
+        if "keys_bits" in sd:  # binaire : ombre reconstruite à ±1
+            s.keys.copy_(unpack_bits(sd["keys_bits"], D).to(s.keys.dtype))
+            s.keys_bits.copy_(sd["keys_bits"].to(s.keys_bits.dtype))
+        else:
+            s.keys.copy_(sd["keys"].to(s.keys.dtype))
+            s.keys_bits.copy_(pack_bits((s.keys.detach().cpu() > 0).to(torch.int64)))
+        if "proj_bits" in sd:
+            s.proj.copy_(unpack_bits(sd["proj_bits"], D).to(s.proj.dtype))
+        else:
+            s.proj.copy_(sd["proj"].to(s.proj.dtype))
         s.values.copy_(sd["values"].to(s.values.dtype))
         s.counts.copy_(sd["counts"].to(s.counts.dtype))
-        s.proj.copy_(sd["proj"].to(s.proj.dtype))
         if "label_hist" in sd:  # compat ascendante (anciennes pages sans ART)
             s.label_hist.copy_(sd["label_hist"].to(s.label_hist.dtype))
         else:
@@ -339,13 +411,19 @@ class PagedAssocExpertRouter(nn.Module):
 
     def read_slot(self, slot: int) -> Dict[str, torch.Tensor]:
         s = self.slots[slot]
-        return {"keys": s.keys.detach().cpu().clone(),
-                "values": s.values.detach().cpu().clone(),
-                "counts": s.counts.detach().cpu().clone(),
-                "proj": s.proj.detach().cpu().clone(),
-                "label_hist": s.label_hist.detach().cpu().clone(),
-                "amaps": s.amaps.detach().cpu().clone(),
-                "centers": s.centers.detach().cpu().clone()}
+        if self.binary_addressing:  # ombre float → bits (÷32, BNN-style)
+            kb = pack_bits((s.keys.detach().cpu() > 0).to(torch.int64))
+            pb = pack_bits((s.proj.detach().cpu() > 0).to(torch.int64))
+            sd = {"keys_bits": kb, "proj_bits": pb}
+        else:
+            sd = {"keys": s.keys.detach().cpu().clone(),
+                  "proj": s.proj.detach().cpu().clone()}
+        sd.update({"values": s.values.detach().cpu().clone(),
+                   "counts": s.counts.detach().cpu().clone(),
+                   "label_hist": s.label_hist.detach().cpu().clone(),
+                   "amaps": s.amaps.detach().cpu().clone(),
+                   "centers": s.centers.detach().cpu().clone()})
+        return sd
 
     # ── Adressage / forward ──────────────────────────────────────
     @property
@@ -415,7 +493,9 @@ class PagedAssocExpertRouter(nn.Module):
                             flat_n[sel, k], self.window,
                             label_ids=y_exp[sel] if y_exp is not None else None,
                             label_hist=slot.label_hist if y_exp is not None else None,
-                            rho=self._rho, amaps=slot.amaps, centers=slot.centers)
+                            rho=self._rho, amaps=slot.amaps, centers=slot.centers,
+                            binary=self.binary_addressing, tau=self.binary_tau,
+                            keys_bits=slot.keys_bits if self.binary_addressing else None)
                         self._fallbacks += fb
                         combined[sel] += w[sel, k].unsqueeze(-1).to(out_k.dtype) * out_k
         out = self.norm(combined.view(B, T, D))
@@ -480,7 +560,9 @@ class PagedAssocExpertRouter(nn.Module):
                     flat_n[sel, k], self.window,
                     label_ids=y_exp[sel] if y_exp is not None else None,
                     label_hist=slot.label_hist if y_exp is not None else None,
-                    rho=rho, amaps=slot.amaps, centers=slot.centers)
+                    rho=rho, amaps=slot.amaps, centers=slot.centers,
+                    binary=self.binary_addressing, tau=self.binary_tau,
+                    keys_bits=slot.keys_bits if self.binary_addressing else None)
                 self._fallbacks += fb
                 le = label_emb[sel] if label_emb is not None else None
                 ly = y_exp[sel] if y_exp is not None else None
@@ -493,6 +575,8 @@ class PagedAssocExpertRouter(nn.Module):
                                     z, x_flat[sel], winners, eta, le, label_alpha,
                                     ly, slot.label_hist if y_exp is not None else None,
                                     sw, re, slot.amaps, slot.centers)
+            if self.binary_addressing and n > 0:  # ombre a bougé → repack (M×D)
+                slot.keys_bits.copy_(pack_bits((slot.keys.detach() > 0).to(torch.int64)))
             touched[f"b{self.block_idx}e{e}"] = n
         if touched:
             self.pager.mark_dirty([(self.block_idx, e) for e in pages
@@ -537,7 +621,8 @@ def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
                      salt: int = 0x9E3779B9,
                      frozen_pages: Optional[Set[int]] = None,
                      n_labels: int = 64, mode: str = "token",
-                     lsh_seed: int = 1234) -> CogNetMoE1B:
+                     lsh_seed: int = 1234, binary_addressing: bool = False,
+                     binary_tau: float = 8.0) -> CogNetMoE1B:
     """Swap chaque router → associatif paginé (init pages directe sur disque)."""
     for b, blk in enumerate(model.blocks):
         legacy = blk.cognitive_expert_router
@@ -547,7 +632,9 @@ def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
         r = PagedAssocExpertRouter(D, E, n_slots, K, n_mem_slots, window,
                                    block_idx=b, pager=pager, salt=salt,
                                    frozen_pages=set(frozen_pages or ()),
-                                   n_labels=n_labels, mode=mode, lsh_seed=lsh_seed)
+                                   n_labels=n_labels, mode=mode, lsh_seed=lsh_seed,
+                                   binary_addressing=binary_addressing,
+                                   binary_tau=binary_tau)
         if hasattr(legacy, "norm"):
             with torch.no_grad():
                 r.norm.load_state_dict(legacy.norm.state_dict())
@@ -682,6 +769,46 @@ def self_test():
     assert m1 < m0 * 0.2, "la delta-rule n'a pas appris la carte!"
     print("  ✓ DELTA-RULE APPREND UNE FONCTION (readout expressif, 0 backprop)")
 
+    # [2d] Adressage binaire : même convergence + Hamming plus rapide que dot.
+    print("\n[2d] Hypervecteurs binaires (Hamming vs dot)...")
+    torch.manual_seed(1)
+    D4, M4 = 16, 6
+    proj4 = torch.sign(torch.randn(D4, D4))
+    keys4 = F.normalize(torch.randn(M4, D4), dim=-1)
+    values4 = torch.zeros(M4, D4)
+    counts4 = torch.zeros(M4)
+    centers4 = F.normalize(torch.randn(3, D4), dim=-1) * 3.0
+    q0 = centers4[torch.randint(0, 3, (512,))] + torch.randn(512, D4) * 0.3
+    for step in range(60):
+        q = centers4[torch.randint(0, 3, (256,))] + torch.randn(256, D4) * 0.3
+        _, _, winners, z, _ = assoc_retrieve(q, proj4, keys4, values4,
+                                             torch.zeros(256, dtype=torch.long), 6,
+                                             binary=True, tau=8.0)
+        hebbian_update(keys4, values4, counts4, z, q, winners, eta=0.1)
+    with torch.no_grad():
+        zh = F.normalize(q0.float() @ proj4.float().T, dim=-1)
+        errb = (1.0 - (zh @ keys4.float().T).max(-1).values).mean().item()
+    # Économie disque clés+proj : 2×M×D fp32 → bits (÷32).
+    kb = pack_bits((keys4 > 0).to(torch.int64))
+    ratio = (keys4.numel() * 4 + proj4.numel() * 4) / max(1, kb.numel() * 8
+            + pack_bits((proj4 > 0).to(torch.int64)).numel() * 8)
+    # Micro-bench adressage : dot (M×D MACs) vs Hamming (XOR+popcount).
+    qb = torch.randn(512, D4)
+    w0 = torch.zeros(512, dtype=torch.long)
+    t0 = time.time()
+    for _ in range(200):
+        assoc_retrieve(qb, proj4, keys4, values4, w0, 6)
+    t_dot = time.time() - t0
+    kb_cache = pack_bits((keys4 > 0).to(torch.int64))  # cache slot (production)
+    t0 = time.time()
+    for _ in range(200):
+        assoc_retrieve(qb, proj4, keys4, values4, w0, 6, binary=True, keys_bits=kb_cache)
+    t_ham = time.time() - t0
+    print(f"  err binaire : {errb:.3f} (float 0.057), ratio disque adressage : {ratio:.1f}×, "
+          f"dot {t_dot*1000:.0f}ms vs Hamming {t_ham*1000:.0f}ms → {t_dot/max(1e-9,t_ham):.2f}×")
+    assert errb < 0.10, "le binaire ne converge pas!"
+    print("  ✓ HAMMING CONVERGE (÷32 disque, 0 backprop)")
+
     # [3] Boucle paginée : déterminisme + writeback exact + 0 param expert.
     print("\n[3] Boucle paginée associative (E=4, S=2, M=8, W=4)...")
     tmp = tempfile.mkdtemp(prefix="assoc_st")
@@ -736,6 +863,45 @@ def self_test():
     print(f"  écart reload disque : {dd:.2e}, writebacks={pg.stats['writebacks']}")
     assert dd == 0.0, "writeback associatif inexact!"
     print("  ✓ PAGING ASSOCIATIF EXACT (déterminisme + writeback bit-à-bit)")
+
+    # [3b] Fidélité reload BINAIRE (l'ombre perd ses magnitudes → ≈, pas =).
+    print("\n[3b] Fidélité reload binaire (bits seuls, ombre ±1)...")
+    mb = convert_to_assoc(_tiny_trunk(E=4, seed=0), n_slots=2,
+                          pager=ExpertPager(PagerConfig(
+                              resident_pages=4, store_dir=os.path.join(tmp, "s3b"))),
+                          n_mem_slots=8, window=4, seed=0, binary_addressing=True)
+    mb.train()
+    for _ in range(5):
+        for r in [b.cognitive_expert_router for b in mb.blocks]:
+            r.set_batch_token_ids(ids)
+        mb(ids)
+        for r in [b.cognitive_expert_router for b in mb.blocks]:
+            r.hebbian_step(eta=0.1)
+    pgb = mb.blocks[0].cognitive_expert_router.pager
+    pgb.flush()
+    mb.eval()
+    with torch.no_grad():
+        ref = mb(ids)["logits"]
+    mr = convert_to_assoc(_tiny_trunk(E=4, seed=99), n_slots=2,
+                          pager=ExpertPager(PagerConfig(
+                              resident_pages=4, store_dir=os.path.join(tmp, "s3c"))),
+                          n_mem_slots=8, window=4, seed=0, binary_addressing=True)
+    pgr = mr.blocks[0].cognitive_expert_router.pager
+    for bb in range(2):
+        for e in range(4):
+            pgr.store.save_page(bb, e, pgb.store.load_page(bb, e))
+    mr.load_state_dict(mb.state_dict())
+    mr.eval()
+    for r in [b.cognitive_expert_router for b in mr.blocks]:
+        r.set_batch_token_ids(ids)
+    with torch.no_grad():
+        got = mr(ids)["logits"]
+    db = (got - ref).abs().max().item()
+    cosb = F.cosine_similarity(got.reshape(-1).float(), ref.reshape(-1).float(),
+                               dim=0).item()
+    print(f"  Δ reload binaire : {db:.4f}, cos-sim : {cosb:.6f}")
+    assert cosb > 0.99, "le reload binaire détruit trop d'info!"
+    print("  ✓ RELOAD BINAIRE FIDÈLE (bits seuls suffisent)")
 
     # [4] Pages int8 associatives (HDC robuste à la quantification).
     print("\n[4] Pages int8 associatives...")
