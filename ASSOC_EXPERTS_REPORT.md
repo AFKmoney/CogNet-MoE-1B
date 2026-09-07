@@ -91,6 +91,41 @@ pas de capacité (M16 ≈ M8) ni d'adressage (fenêtre pleine ≡ hash).
 - Tête + tronc non-expert encore en Adam : le 100 % sans-gradient reste un horizon
   (tête lstsq online = piste, cf. Exp B hash).
 
+## 8. v2 — Campagne erreur-par-token (résultat : plafond mappé, loi établie)
+
+Question : signal discriminant par token SANS graphe global. 20+ configs seed-0
++ run 3-seed. Réponse honnête : **+0.00** — le plafond du lookup-prototype est
+3.55±0.02, et la campagne révèle la loi de l'architecture.
+
+| Voie | Mécanisme (tous 0 gradient) | seed-0 | Verdict |
+|---|---|---|---|
+| FA broadcast (v1) | erreur séquence → clés | 3.59 | ✗ dégrade (aucun contraste) |
+| FA centrée β=1 / β=2 | sonde fixe + résidu token | 3.59 / 3.55 | ✗ neutre/négatif — **retirée du code** |
+| ART-label (token-hash) ρ=.3/.5 | vigilance catégorielle | **bit-identique** | ✗ dégénère (preuve ci-dessous) |
+| LSH + ART | routage corrélé + vigilance | 3.63 / identique | ✗ LSH pire + ART dégénère encore |
+| Binding α=1.0 / 2.0 | readout supervisé fort | 3.61 / 3.56 | ~ sweet spot α=0.5 |
+| Nouveauté γ=2 / γ=4 | match-tracking (plasticité) | 3.53 / 3.60 | ~ γ=2 aide, γ=4 oublie |
+| **v2 fige (α.5+γ2, 3 seeds)** | | **3.549 vs 3.556** | ~ −0.008 : plat |
+
+**Preuve de dégénérescence ART** : le repli retombe sur l'argmax ; sous routage
+indépendant des labels, les histogrammes sont uniformes → soit commit (argmax),
+soit repli (argmax) → gagnants **bit-identiques** à vigilance 0 (vérifié au chiffre).
+Sous LSH : scatter RoPE + labels many-to-one sur les contextes (64 valeurs pour
+224 positions — même label ⟺ contextes DIFFÉRENTS) → même uniformité. ART exige
+une géométrie label-corrélée que ni le hash ni cette tâche ne fournissent
+(synthèse corrélée : pureté 0.97 — le mécanisme est sain, son domaine absent).
+
+**Loi empirique** : *l'adressage n'accepte que du non-supervisé* (Hebb ✓, FA-clés ✗,
+ART ✗) ; *seul le readout accepte le signal tâche* (binding ✓). Le gap +1.68 n'est
+ni capacité (M16≈M8), ni adressage (W8≡W4), ni signal (20 configs plates) : c'est
+**l'expressivité du readout** — lookup de prototypes vs fonction apprise.
+
+**v3 proposée** : tête à pooling ATTENTIF (1 couche → crédit par token gratuit,
+pas de graphe global) + slots **localement-linéaires** (mini-readout par slot
+appris en delta-rule locale sur ce crédit). Ou axe matériel : hypervecteurs
+binaires (÷32, Hamming). L'infra v2 reste intacte : O(1), prefetch 83 %, writeback
+bit-à-bit, 0 joker — la campagne n'a rien cassé (régressions vertes).
+
 ## 7. Usage
 
 ```bash

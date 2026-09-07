@@ -60,7 +60,7 @@ import torch.nn.functional as F
 
 from cognet_1b_optimized import RMSNorm  # noqa: E402
 from cognet_moe import CogNetMoE1B  # noqa: E402
-from hash_moe import token_hash_experts  # noqa: E402
+from hash_moe import token_hash_experts, LSHHasher  # noqa: E402
 from expert_pager import (ExpertPager, PagerConfig, PageId,  # noqa: E402
                           hash_ahead_pages)
 
@@ -85,6 +85,19 @@ def assoc_address(token_ids: torch.Tensor, n_experts: int, top_k: int,
     return pages, win
 
 
+def assoc_address_lsh(code: torch.Tensor, hasher: LSHHasher, n_experts: int,
+                      top_k: int, n_mem_slots: int):
+    """(B,T) code LSH → pages (B,T,K) + fenêtres (B,T,K), UNE SEULE source.
+    Bits bas → pages (via experts(code)), bits hauts → fenêtres : O(1) unifié,
+    zéro double calcul (le code est computé une fois par le router)."""
+    B, T = code.shape
+    pages = hasher.experts(None, n_experts, top_k, code=code)
+    win = torch.empty((B, T, top_k), dtype=torch.long, device=code.device)
+    for j in range(top_k):
+        win[..., j] = ((code >> (14 + j * 5)) % n_mem_slots).to(torch.long)
+    return pages, win
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Cœur associatif : retrieval + superposition Hebbienne (fonctions pures)
 # ═══════════════════════════════════════════════════════════════════════
@@ -92,11 +105,19 @@ def assoc_address(token_ids: torch.Tensor, n_experts: int, top_k: int,
 @torch.no_grad()
 def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
                    keys: torch.Tensor, values: torch.Tensor,
-                   win_start: torch.Tensor, window: int):
+                   win_start: torch.Tensor, window: int,
+                   label_ids: Optional[torch.Tensor] = None,
+                   label_hist: Optional[torch.Tensor] = None,
+                   rho: float = 0.5, commit_min: int = 3):
     """
-    q (N,D) → out (N,D) + poids (N,W) + gagnants (N,) + codes z (N,D).
+    q (N,D) → out (N,D) + poids (N,W) + gagnants (N,) + codes z (N,D) + replis.
     Fenêtre circulaire de W slots depuis win_start, rerank par similarité.
-    Sans gradient (décorateur + buffers gelés).
+    Si labels fournis (train) : VIGILANCE ART — le gagnant est le premier slot
+    du rang de similarité dont l'historique accepte le label
+    (frac Laplace >= rho, ou slot quasi-vierge = commit direct) ; sinon repli
+    sur le meilleur score (compté). Sans labels (éval) : argmax pur.
+    Sans gradient (décorateur + buffers gelés). Le scalpel v2 : discret, local,
+    par token — aucune backprop, aucun matmul de feedback, aucune échelle à tuner.
     """
     N, D = q.shape
     M = keys.shape[0]
@@ -108,48 +129,71 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
     scores = (z.unsqueeze(1) * k).sum(-1) / math.sqrt(D)
     w = torch.softmax(scores, -1).to(q.dtype)
     out = (w.unsqueeze(-1) * values.float()[idx]).sum(1).to(q.dtype)
-    winners = idx[torch.arange(N, device=q.device), scores.argmax(-1)]
-    return out, w, winners, z.to(q.dtype)
+    order = scores.argsort(dim=-1, descending=True)  # rangs de similarité
+    ar = torch.arange(N, device=q.device)
+    winners = idx[ar, order[:, 0]]
+    n_fallback = 0
+    if label_ids is not None and label_hist is not None:
+        lh = label_hist.float()
+        tot = lh.sum(-1)  # (M,) totaux figés pendant le retrieval
+        LV = lh.shape[1]
+        assigned = torch.zeros(N, dtype=torch.bool, device=q.device)
+        wins = torch.empty(N, dtype=torch.long, device=q.device)
+        for r in range(W):
+            cand = idx[ar, order[:, r]]
+            frac = (lh[cand, label_ids] + 1.0) / (tot[cand] + LV)  # Laplace
+            ok = (frac >= rho) | (tot[cand] < commit_min)  # vigilance ou commit
+            fresh = ok & ~assigned
+            wins[fresh] = cand[fresh]
+            assigned |= fresh
+        n_fallback = int((~assigned).sum().item())
+        wins[~assigned] = winners[~assigned]
+        winners = wins
+    return out, w, winners, z.to(q.dtype), n_fallback
 
 
 @torch.no_grad()
 def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tensor,
                    z: torch.Tensor, q: torch.Tensor, winners: torch.Tensor,
                    eta: float = 0.05, label_emb: Optional[torch.Tensor] = None,
-                   label_alpha: float = 0.5, err_h: Optional[torch.Tensor] = None,
-                   proj: Optional[torch.Tensor] = None, fa_beta: float = 1.0):
+                   label_alpha: float = 0.5,
+                   label_ids: Optional[torch.Tensor] = None,
+                   label_hist: Optional[torch.Tensor] = None,
+                   sample_weight: Optional[torch.Tensor] = None):
     """
     Superposition directe WTA-EMA (vectorisée) — in-place, sans gradient.
     Gagnants multiples sur le même slot : moyenne des cibles d'abord.
+    sample_weight (N,) : plasticité par token (match-tracking : les tokens
+    surpris — faible confiance de retrieval — absorbent plus).
     Si label_emb : binding HDC requête⊕label sur les VALUES (les clés restent
     en espace-q pour le matching à l'éval, où le label est inconnu).
-    Si err_h (+proj) : feedback-alignment — l'erreur globale (projetée par une
-    matrice FIXE aléatoire, jamais apprise) sculpte les CLÉS : l'adressage
-    devient informé par la tâche tout en restant calculable sans label à
-    l'éval (les clés sont STOCKÉES). Toujours ZÉRO backprop.
+    Si label_ids + label_hist : trace ART (le slot gagnant absorbe le label).
+    NOTE : la voie FA-erreur-sur-clés a été testée et ABANDONNÉE (3.55→3.59 :
+    l'adressage doit rester fidèle aux entrées ; le signal catégoriel passe
+    par la vigilance ART dans assoc_retrieve, pas par une erreur projetée).
     Retourne le nombre de slots touchés.
     """
     M = keys.shape[0]
-    cnt = torch.bincount(winners, minlength=M).to(torch.float32)
+    sw = (torch.ones(winners.shape[0], device=winners.device) if sample_weight is None
+          else sample_weight.float())
+    cnt = torch.zeros(M, device=winners.device)
+    cnt.index_add_(0, winners, sw)
     mask = cnt > 0
     n_touched = int(mask.sum().item())
     if n_touched == 0:
         return 0
     sumz = torch.zeros_like(keys.float())
-    sumz.index_add_(0, winners, z.float())
+    sumz.index_add_(0, winners, z.float() * sw.unsqueeze(-1))
     sumq = torch.zeros_like(values.float())
-    sumq.index_add_(0, winners, q.float())
+    sumq.index_add_(0, winners, q.float() * sw.unsqueeze(-1))
     tz = sumz[mask] / cnt[mask].unsqueeze(-1)
     tq = sumq[mask] / cnt[mask].unsqueeze(-1)
     if label_emb is not None:  # supervision locale, toujours sans gradient
         suml = torch.zeros_like(values.float())
         suml.index_add_(0, winners, label_emb.float())
         tq = tq + label_alpha * (suml[mask] / cnt[mask].unsqueeze(-1))
-    if err_h is not None and proj is not None:  # FA : erreur → espace-z
-        sumd = torch.zeros_like(values.float())
-        sumd.index_add_(0, winners, err_h.float())
-        dz = (sumd[mask] / cnt[mask].unsqueeze(-1)) @ proj.float().T
-        tz = tz + fa_beta * dz.to(tz.dtype)
+    if label_ids is not None and label_hist is not None:  # trace ART
+        label_hist[winners, label_ids] += 1
     keys[mask] = F.normalize(keys.float()[mask] + eta * (tz - keys.float()[mask]),
                              dim=-1).to(keys.dtype)
     values[mask] = (values.float()[mask] + eta * (tq - values.float()[mask])).to(values.dtype)
@@ -164,12 +208,15 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
 class AssocSlot(nn.Module):
     """Un slot = une mémoire associative résidente (buffers, jamais de grad)."""
 
-    def __init__(self, hidden_dim: int, n_mem_slots: int):
+    def __init__(self, hidden_dim: int, n_mem_slots: int, n_labels: int = 64):
         super().__init__()
         self.register_buffer("keys", torch.zeros(n_mem_slots, hidden_dim))
         self.register_buffer("values", torch.zeros(n_mem_slots, hidden_dim))
         self.register_buffer("counts", torch.zeros(n_mem_slots))
         self.register_buffer("proj", torch.zeros(hidden_dim, hidden_dim))
+        # Trace ART par slot (int32 : stockée EXACTE, jamais quantifiée).
+        self.register_buffer("label_hist", torch.zeros(n_mem_slots, n_labels,
+                                                       dtype=torch.int32))
 
 
 class PagedAssocExpertRouter(nn.Module):
@@ -183,27 +230,37 @@ class PagedAssocExpertRouter(nn.Module):
                  top_k: int = 2, n_mem_slots: int = 8, window: int = 4,
                  block_idx: int = 0, pager: Optional[ExpertPager] = None,
                  salt: int = 0x9E3779B9,
-                 frozen_pages: Optional[Set[int]] = None):
+                 frozen_pages: Optional[Set[int]] = None,
+                 n_labels: int = 64, mode: str = "token",
+                 n_bits: int = 24, lsh_seed: int = 1234):
         super().__init__()
         assert top_k <= n_experts
+        assert mode in ("token", "lsh")
+        self.mode = mode
         self.hidden_dim = hidden_dim
         self.n_experts = n_experts
         self.num_channels = n_experts  # alias compat
         self.n_slots = n_slots
         self.top_k = top_k
         self.n_mem_slots = n_mem_slots
+        self.n_labels = n_labels
         self.window = window
         self.block_idx = block_idx
         self.pager = pager
         self.salt = salt
         self._frozen_pages = set(frozen_pages or ())
-        self.slots = nn.ModuleList([AssocSlot(hidden_dim, n_mem_slots)
+        self.slots = nn.ModuleList([AssocSlot(hidden_dim, n_mem_slots, n_labels)
                                     for _ in range(n_slots)])
+        self.lsh = (LSHHasher(hidden_dim, n_bits, lsh_seed + block_idx)
+                    if mode == "lsh" else None)
         self.norm = RMSNorm(hidden_dim)
         self.aux_loss_weight = 0.0
         self.z_loss_weight = 0.0
         self._batch_token_ids: Optional[torch.Tensor] = None
-        self._last: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
+        self._batch_labels: Optional[torch.Tensor] = None
+        self._rho = 0.5
+        self._last = None
+        self._fallbacks = 0  # replis vigilance cumulés (diagnostic)
 
     @property
     def frozen_pages(self):
@@ -219,7 +276,8 @@ class PagedAssocExpertRouter(nn.Module):
             sd = {"keys": keys,
                   "values": torch.zeros(M, D),   # démarrage froid = sortie nulle
                   "counts": torch.zeros(M),
-                  "proj": torch.randn(D, D, generator=g) / math.sqrt(D)}
+                  "proj": torch.randn(D, D, generator=g) / math.sqrt(D),
+                  "label_hist": torch.zeros(M, self.n_labels, dtype=torch.int32)}
             pager.store.save_page(self.block_idx, e, sd)
 
     def install_page(self, page: PageId, sd: Dict[str, torch.Tensor], slot: int):
@@ -228,35 +286,53 @@ class PagedAssocExpertRouter(nn.Module):
         s.values.copy_(sd["values"].to(s.values.dtype))
         s.counts.copy_(sd["counts"].to(s.counts.dtype))
         s.proj.copy_(sd["proj"].to(s.proj.dtype))
+        if "label_hist" in sd:  # compat ascendante (anciennes pages sans ART)
+            s.label_hist.copy_(sd["label_hist"].to(s.label_hist.dtype))
+        else:
+            s.label_hist.zero_()
 
     def read_slot(self, slot: int) -> Dict[str, torch.Tensor]:
         s = self.slots[slot]
         return {"keys": s.keys.detach().cpu().clone(),
                 "values": s.values.detach().cpu().clone(),
                 "counts": s.counts.detach().cpu().clone(),
-                "proj": s.proj.detach().cpu().clone()}
+                "proj": s.proj.detach().cpu().clone(),
+                "label_hist": s.label_hist.detach().cpu().clone()}
 
     # ── Adressage / forward ──────────────────────────────────────
-    supports_id_prefetch = True  # prefetch exact par ids (hash-ahead)
+    @property
+    def supports_id_prefetch(self) -> bool:
+        return self.mode == "token"  # LSH → working_set_hint (heuristique)
 
     def set_batch_token_ids(self, ids):
         self._batch_token_ids = ids
 
+    def set_batch_labels(self, y):
+        self._batch_labels = y  # (B,) — vigilance ART au train, ignoré à l'éval
+
     def assign_pages(self, x: torch.Tensor, token_ids=None) -> torch.Tensor:
-        if token_ids is None:
-            token_ids = x if x.dtype == torch.long else self._batch_token_ids
-        assert token_ids is not None, "mode token : fournir token_ids"
-        pages, _ = assoc_address(token_ids, self.n_experts, self.top_k,
-                                 self.n_mem_slots, self.salt)
-        return pages
+        if self.mode == "token":
+            if token_ids is None:
+                token_ids = x if x.dtype == torch.long else self._batch_token_ids
+            assert token_ids is not None, "mode token : fournir token_ids"
+            pages, _ = assoc_address(token_ids, self.n_experts, self.top_k,
+                                     self.n_mem_slots, self.salt)
+            return pages
+        code = self.lsh.codes(x.detach().float())
+        return self.lsh.experts(x, self.n_experts, self.top_k, code=code)
 
     def forward(self, x: torch.Tensor, token_ids=None):
         B, T, D = x.shape
         K = self.top_k
         N = B * T
-        ids = self._batch_token_ids if token_ids is None else token_ids
-        assert ids is not None, "mode token : fournir token_ids"
-        pages, wins = assoc_address(ids, self.n_experts, K, self.n_mem_slots, self.salt)
+        if self.mode == "token":
+            ids = self._batch_token_ids if token_ids is None else token_ids
+            assert ids is not None, "mode token : fournir token_ids"
+            pages, wins = assoc_address(ids, self.n_experts, K, self.n_mem_slots, self.salt)
+        else:  # LSH : 1 code → pages + fenêtres (O(1) unifié, corrélé contenu)
+            code = self.lsh.codes(x.detach().float())
+            pages, wins = assoc_address_lsh(code, self.lsh, self.n_experts, K,
+                                            self.n_mem_slots)
         pages = pages.to(x.device)
         wins = wins.to(x.device)
         w = torch.full((N, K), 1.0 / K, device=x.device, dtype=x.dtype)
@@ -266,6 +342,10 @@ class PagedAssocExpertRouter(nn.Module):
         # Vagues (même politique que le dense : S − pinnées).
         pinned_here = sum(1 for p in self.pager.pinned if p[0] == self.block_idx)
         wave = max(1, self.n_slots - pinned_here)
+        # Vigilance ART au train seulement (labels connus) ; éval = argmax pur.
+        y_exp = None
+        if self.training and self._batch_labels is not None:
+            y_exp = self._batch_labels.reshape(-1).repeat_interleave(T)
         # Retrieval SANS gradient : experts détachés (le global passe par résiduels).
         with torch.no_grad():
             combined = torch.zeros(N, D, device=x.device, dtype=x.dtype)
@@ -282,14 +362,18 @@ class PagedAssocExpertRouter(nn.Module):
                         sel = (flat_p[:, k] == e)
                         if not bool(sel.any().item()):
                             continue
-                        out_k, _, _, _ = assoc_retrieve(
+                        out_k, _, _, _, fb = assoc_retrieve(
                             x_flat[sel], slot.proj, slot.keys, slot.values,
-                            flat_n[sel, k], self.window)
+                            flat_n[sel, k], self.window,
+                            label_ids=y_exp[sel] if y_exp is not None else None,
+                            label_hist=slot.label_hist if y_exp is not None else None,
+                            rho=self._rho)
+                        self._fallbacks += fb
                         combined[sel] += w[sel, k].unsqueeze(-1).to(out_k.dtype) * out_k
-        # Enregistre pour hebbian_step (références, pas de clones).
-        self._last = (x_flat.detach(), flat_p, flat_n)
         out = self.norm(combined.view(B, T, D))
         out = x + out
+        # Enregistre pour hebbian_step + sonde locale (références, pas de clones).
+        self._last = (x_flat.detach(), out.reshape(N, D).detach(), flat_p, flat_n, (B, T))
         with torch.no_grad():
             f = torch.zeros(self.n_experts, device=x.device, dtype=x.dtype)
             f.scatter_add_(0, flat_p.reshape(-1),
@@ -310,16 +394,21 @@ class PagedAssocExpertRouter(nn.Module):
 
     @torch.no_grad()
     def hebbian_step(self, eta: float = 0.05, label_emb: Optional[torch.Tensor] = None,
-                     label_alpha: float = 0.5, err_h: Optional[torch.Tensor] = None,
-                     fa_beta: float = 1.0) -> Dict[str, int]:
+                     label_alpha: float = 0.5,
+                     label_ids: Optional[torch.Tensor] = None,
+                     rho: float = 0.5, novelty_gamma: float = 0.0) -> Dict[str, int]:
         """
         Superposition Hebbienne sur les pages du dernier forward.
         label_emb (N,D) : binding requête⊕label sur values (supervisé, 0 grad).
-        err_h (N,D) : erreur FA broadcastée (sculpte les clés, 0 backprop).
+        label_ids (B,) : vigilance ART (gagnants catégoriels) + trace hist.
+        novelty_gamma : match-tracking — poids ×(1+γ·(1−confiance)) ; les tokens
+            surpris absorbent plus (allocation, pas adressage — 0 gradient).
         Retourne {page: slots_touchés}. Pages frozen sautées (palimpseste).
         """
         assert self._last is not None, "hebbian_step après forward"
-        x_flat, flat_p, flat_n = self._last
+        x_flat, _, flat_p, flat_n, (B, T) = self._last
+        self._rho = rho
+        y_exp = label_ids.reshape(-1).repeat_interleave(T) if label_ids is not None else None
         K = self.top_k
         touched: Dict[str, int] = {}
         pages = sorted(set(flat_p.reshape(-1).tolist()))
@@ -336,14 +425,23 @@ class PagedAssocExpertRouter(nn.Module):
                 sel = (flat_p[:, k] == e)
                 if not bool(sel.any().item()):
                     continue
-                _, _, winners, z = assoc_retrieve(
+                _, w8, winners, z, fb = assoc_retrieve(
                     x_flat[sel], slot.proj, slot.keys, slot.values,
-                    flat_n[sel, k], self.window)
+                    flat_n[sel, k], self.window,
+                    label_ids=y_exp[sel] if y_exp is not None else None,
+                    label_hist=slot.label_hist if y_exp is not None else None,
+                    rho=rho)
+                self._fallbacks += fb
                 le = label_emb[sel] if label_emb is not None else None
-                eh = err_h[sel] if err_h is not None else None
+                ly = y_exp[sel] if y_exp is not None else None
+                sw = None
+                if novelty_gamma > 0:  # surpris → plastique (confiance gratuite)
+                    conf = w8.max(-1).values.float()
+                    sw = 1.0 + novelty_gamma * (1.0 - conf)
                 n += hebbian_update(slot.keys, slot.values, slot.counts,
                                     z, x_flat[sel], winners, eta, le, label_alpha,
-                                    eh, slot.proj, fa_beta)
+                                    ly, slot.label_hist if y_exp is not None else None,
+                                    sw)
             touched[f"b{self.block_idx}e{e}"] = n
         if touched:
             self.pager.mark_dirty([(self.block_idx, e) for e in pages
@@ -354,7 +452,9 @@ class PagedAssocExpertRouter(nn.Module):
 def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
                      n_mem_slots: int = 8, window: int = 4, seed: int = 0,
                      salt: int = 0x9E3779B9,
-                     frozen_pages: Optional[Set[int]] = None) -> CogNetMoE1B:
+                     frozen_pages: Optional[Set[int]] = None,
+                     n_labels: int = 64, mode: str = "token",
+                     lsh_seed: int = 1234) -> CogNetMoE1B:
     """Swap chaque router → associatif paginé (init pages directe sur disque)."""
     for b, blk in enumerate(model.blocks):
         legacy = blk.cognitive_expert_router
@@ -363,7 +463,8 @@ def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
         D = legacy.hidden_dim if hasattr(legacy, "hidden_dim") else model.hidden_dim
         r = PagedAssocExpertRouter(D, E, n_slots, K, n_mem_slots, window,
                                    block_idx=b, pager=pager, salt=salt,
-                                   frozen_pages=set(frozen_pages or ()))
+                                   frozen_pages=set(frozen_pages or ()),
+                                   n_labels=n_labels, mode=mode, lsh_seed=lsh_seed)
         if hasattr(legacy, "norm"):
             with torch.no_grad():
                 r.norm.load_state_dict(legacy.norm.state_dict())
@@ -428,7 +529,7 @@ def self_test():
     for step in range(60):
         q = centers[torch.randint(0, 3, (256,))] + torch.randn(256, D) * 0.3
         win0 = torch.zeros(256, dtype=torch.long)
-        _, _, winners, z = assoc_retrieve(q, proj, keys, values, win0, 6)
+        _, _, winners, z, _ = assoc_retrieve(q, proj, keys, values, win0, 6)
         hebbian_update(keys, values, counts, z, q, winners, eta=0.1)
     with torch.no_grad():
         err1 = ang_err(q0)
@@ -437,6 +538,32 @@ def self_test():
     assert err1 < err0 * 0.5, "Hebb n'a pas convergé!"
     assert used >= 3, "clusters non couverts!"
     print("  ✓ SUPERPOSITION HEBBIENNE CONVERGE (sans aucun gradient)")
+
+    # [2b] Vigilance ART : entrées corrélées aux labels → slots spécialisés.
+    # (Géométrie réaliste : même label ⟺ contextes similaires. À entrées
+    # indépendantes des labels, ART ne peut rien amplifier — vérifié : 0.50.)
+    print("\n[2b] Vigilance ART (séparation catégorielle, 0 gradient)...")
+    torch.manual_seed(2)
+    D2, M2, LV = 16, 4, 2
+    proj2 = torch.randn(D2, D2) / math.sqrt(D2)
+    keys2 = F.normalize(torch.randn(M2, D2), dim=-1)
+    values2 = torch.zeros(M2, D2)
+    counts2 = torch.zeros(M2)
+    hist2 = torch.zeros(M2, LV, dtype=torch.int32)
+    cA, cB = torch.randn(D2), torch.randn(D2)
+    for step in range(40):
+        y = torch.arange(256) % 2
+        q = torch.where((y == 0).unsqueeze(-1), cA, cB) + torch.randn(256, D2) * 0.5
+        win0 = torch.zeros(256, dtype=torch.long)
+        _, _, winners, z, _ = assoc_retrieve(q, proj2, keys2, values2, win0, 4,
+                                             label_ids=y, label_hist=hist2, rho=0.5)
+        hebbian_update(keys2, values2, counts2, z, q, winners, eta=0.1,
+                       label_ids=y, label_hist=hist2)
+    used = hist2.sum(-1) > 0
+    pur = (hist2.float().max(-1).values / hist2.float().sum(-1).clamp_min(1))[used].mean().item()
+    print(f"  pureté moyenne des slots : {pur:.3f} (utilisés {int(used.sum())}/{M2})")
+    assert pur > 0.9, "ART n'a pas séparé les labels!"
+    print("  ✓ VIGILANCE ART SÉPARE LES CATÉGORIES (scalpel discret)")
 
     # [3] Boucle paginée : déterminisme + writeback exact + 0 param expert.
     print("\n[3] Boucle paginée associative (E=4, S=2, M=8, W=4)...")

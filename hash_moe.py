@@ -97,10 +97,12 @@ class LSHHasher(nn.Module):
             packed |= bits[..., i].long() << i
         return packed
 
-    def experts(self, x: torch.Tensor, n_experts: int, top_k: int) -> torch.Tensor:
-        code = self.codes(x)  # (B, T)
+    def experts(self, x: torch.Tensor, n_experts: int, top_k: int,
+                code: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if code is None:
+            code = self.codes(x)  # (B, T)
         C, K = n_experts, top_k
-        out = torch.empty(code.shape + (K,), dtype=torch.long, device=x.device)
+        out = torch.empty(code.shape + (K,), dtype=torch.long, device=code.device)
         for j in range(top_k):
             e = ((code >> (j * 7)) % C).to(torch.long)
             if j > 0:

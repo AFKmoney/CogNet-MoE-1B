@@ -682,7 +682,7 @@ def working_set_hint(recent_pages: List[PageId], next_token_ids: torch.Tensor,
     donc du bruit pur pour LSH (mesuré : dilue le recall)."""
     pages: List[PageId] = [p for p in recent_pages]
     r0 = model.blocks[0].cognitive_expert_router
-    if isinstance(r0, PagedHashExpertRouter) and r0.mode == "lsh":
+    if getattr(r0, "mode", None) == "lsh" and getattr(r0, "lsh", None) is not None:
         with torch.no_grad():
             h0 = model.encoder(next_token_ids)
             a0 = r0.lsh.experts(h0, r0.n_experts, r0.top_k)

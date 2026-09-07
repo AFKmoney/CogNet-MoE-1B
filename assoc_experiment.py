@@ -35,19 +35,23 @@ import torch.nn.functional as F
 from refute_edt import (make_trunk, make_pattern, probe_batch_fn, trunk_hidden,
                         TokenCounter, VPROBE)
 from hash_moe import convert_to_hash
-from expert_pager import ExpertPager, PagerConfig, hash_ahead_pages
+from expert_pager import ExpertPager, PagerConfig, hash_ahead_pages, working_set_hint
 from assoc_experts import convert_to_assoc
 
 SEEDS = [0, 1, 2]
 TOKENS = 200_000
+VIGILANCE = 0.0  # ART-label dégénère (histogrammes uniformes, cf. rapport §8)
+NOVELTY_GAMMA = 2.0  # match-tracking (ablation : 2 aide, 4 oublie)
 B, T = 16, 32
 
 
-def set_ids(model, ids):
+def set_ids(model, ids, labels=None):
     for blk in model.blocks:
         r = blk.cognitive_expert_router
         if hasattr(r, "set_batch_token_ids"):
             r.set_batch_token_ids(ids)
+        if labels is not None and hasattr(r, "set_batch_labels"):
+            r.set_batch_labels(labels)
 
 
 @torch.no_grad()
@@ -64,18 +68,23 @@ def assoc_eval(model, head, batch_fn, n_batches=40):
 
 
 def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
-              bind_alpha=0.0, fa_beta=0.0, fb=None, tag=""):
-    """Boucle partagée (équité stricte) ; Hebb (+binding +FA) seul distingue ASSOC."""
+              bind_alpha=0.0, vigilance=0.0, lsh_hint=False, novelty_gamma=0.0,
+              tag=""):
+    """Boucle partagée (équité stricte) ; Hebb (+binding +ART) distingue ASSOC."""
     opt = torch.optim.AdamW(list(model.parameters()) + list(head.parameters()), lr=3e-4)
     steps = max(1, tokens // (B * T))
     cur = batch_fn(B, T)
+    recent = []
     for s in range(steps):
         nxt = batch_fn(B, T)
-        if pager is not None:  # hash-ahead exact (même sel → mêmes pages)
-            pager.prefetch(hash_ahead_pages(nxt[0], model))
+        if pager is not None:
+            if lsh_hint:  # LSH : hint heuristique (couche-0 exacte + localité)
+                pager.prefetch(working_set_hint(recent, nxt[0], model))
+            else:  # token : hash-ahead exact (même sel → mêmes pages)
+                pager.prefetch(hash_ahead_pages(nxt[0], model))
             pager._install_prefetched()
         x, y = cur
-        set_ids(model, x)
+        set_ids(model, x, y if vigilance > 0 else None)
         opt.zero_grad()
         h, aux, z = trunk_hidden(model, x)
         loss = F.cross_entropy(head(h.mean(dim=1)), y)
@@ -83,19 +92,21 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
         torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(head.parameters()), 1.0)
         opt.step()
         if hebbian_eta > 0:  # superposition directe (sans gradient)
-            pager.prefetch(hash_ahead_pages(x, model))
-            le, eh = None, None
+            if lsh_hint:
+                pager.prefetch(working_set_hint(recent, x, model))
+            else:
+                pager.prefetch(hash_ahead_pages(x, model))
+            le = None
             with torch.no_grad():
                 if bind_alpha > 0:  # embedding du label, détaché (cible)
                     le = model.encoder.token_emb(y).repeat_interleave(T, dim=0)
-                if fa_beta > 0:  # erreur globale → projection FIXE → tokens
-                    p = F.softmax(head(h.mean(dim=1)), -1)
-                    e = p - F.one_hot(y, VPROBE).float()
-                    eh = (e @ fb.T).repeat_interleave(T, dim=0)
             for blk in model.blocks:
-                blk.cognitive_expert_router.hebbian_step(
-                    eta=hebbian_eta, label_emb=le, label_alpha=bind_alpha,
-                    err_h=eh, fa_beta=fa_beta)
+                r = blk.cognitive_expert_router
+                ly = y if vigilance > 0 else None
+                r.hebbian_step(eta=hebbian_eta, label_emb=le, label_alpha=bind_alpha,
+                               label_ids=ly, rho=vigilance if vigilance > 0 else 0.5,
+                               novelty_gamma=novelty_gamma)
+            recent = sorted(pager.resident.keys())[-8:]
         cur = nxt
     if pager is not None:
         pager.flush()
@@ -103,7 +114,8 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
 
 
 def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
-            n_mem_slots=8, window=4, bind_alpha=0.0, fa_beta=0.0):
+            n_mem_slots=8, window=4, bind_alpha=0.0, vigilance=0.0, mode="token",
+            novelty_gamma=0.0):
     t0 = time.time()
     counter = TokenCounter()
     pattern = make_pattern(pattern_seed)
@@ -115,7 +127,7 @@ def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
     if kind == "ASSOC":
         pager = ExpertPager(PagerConfig(store_dir=f"/tmp/assoc_exp_{seed}", num_loaders=4))
         model = convert_to_assoc(trunk, n_slots=2, pager=pager, n_mem_slots=n_mem_slots,
-                                 window=window, seed=seed)
+                                 window=window, seed=seed, n_labels=VPROBE, mode=mode)
         eta = 0.05
     else:
         model = convert_to_hash(trunk, mode="token")
@@ -123,12 +135,9 @@ def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
                  if p.requires_grad)
     probe_fn = probe_batch_fn(pattern, noise, seed=500 + seed, counter=counter)
     init_eval = assoc_eval(model, head, probe_batch_fn(pattern, noise, seed=9999))
-    fb = None
-    if fa_beta > 0:  # matrice FA FIXE (jamais apprise) : (D, V)
-        g = torch.Generator().manual_seed(31337)
-        fb = torch.randn(64, VPROBE, generator=g) / (VPROBE ** 0.5)
     train_arm(model, head, probe_fn, total_tokens, pager, eta, bind_alpha,
-              fa_beta, fb, tag=f"{kind}{seed}")
+              vigilance, lsh_hint=(kind == "ASSOC" and mode == "lsh"),
+              novelty_gamma=novelty_gamma, tag=f"{kind}{seed}")
     loss = assoc_eval(model, head, probe_batch_fn(pattern, noise, seed=9999))
     dt = time.time() - t0
     model.eval()
@@ -141,6 +150,8 @@ def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
            "tok_s": counter.n / dt, "usage": usage, "trainable": ntrain}
     if pager is not None:
         out["pager"] = {k: v for k, v in pager.stats.items()}
+        out["art_fallbacks"] = sum(
+            getattr(blk.cognitive_expert_router, "_fallbacks", 0) for blk in model.blocks)
     return out
 
 
@@ -151,7 +162,8 @@ def main():
     print("=" * 70)
     results = {}
     for seed in SEEDS:
-        a = run_arm("ASSOC", seed, TOKENS, bind_alpha=0.5)
+        a = run_arm("ASSOC", seed, TOKENS, bind_alpha=0.5, vigilance=VIGILANCE,
+                    novelty_gamma=NOVELTY_GAMMA)
         h = run_arm("HASH-TOKEN", seed, TOKENS)
         results[f"seed{seed}"] = {"ASSOC": a, "HASH-TOKEN": h}
         print(f"  seed {seed} ASSOC     : eval={a['eval']:.4f} (init {a['init_eval']:.4f}) "
@@ -177,14 +189,13 @@ def ablate():
     print("=" * 70)
     print("Ablation seed-0 : M/W × binding label (200k tokens chacun)")
     print("=" * 70)
-    for tag, kw in [("M8W8/bind.5", {"window": 8, "bind_alpha": 0.5}),
-                    ("M8/bind.5/fa1", {"bind_alpha": 0.5, "fa_beta": 1.0}),
-                    ("M8W8/bind.5/fa1", {"window": 8, "bind_alpha": 0.5,
-                                         "fa_beta": 1.0})]:
+    for tag, kw in [("a.25/nov2", {"bind_alpha": 0.25, "novelty_gamma": 2.0}),
+                    ("a.5/nov4", {"bind_alpha": 0.5, "novelty_gamma": 4.0})]:
         a = run_arm("ASSOC", 0, TOKENS, **kw)
         p = a["pager"]
         print(f"  {tag:12s}: eval={a['eval']:.4f} tok/s={a['tok_s']:.0f} "
-              f"hits={p['hits']} sync={p['faults_sync']} couverts={p['faults_covered']}")
+              f"hits={p['hits']} sync={p['faults_sync']} couverts={p['faults_covered']} "
+              f"ART_replis={a.get('art_fallbacks', 0)}")
 
 
 if __name__ == "__main__":
