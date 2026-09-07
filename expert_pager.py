@@ -75,8 +75,13 @@ class PagerConfig:
 
 
 def _quantize_state(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    # Seules les MATRICES (dim>=2, le gros du volume) passent en int8 ;
+    # vecteurs/scalaires (biais, normes, compteurs Hebbiens) restent exacts.
     out = {}
     for k, v in sd.items():
+        if v.dim() < 2 or not v.is_floating_point():
+            out[k] = v
+            continue
         v = v.float()
         s = v.abs().max().clamp_min(1e-8) / 127.0
         out[k] = (v / s).round().clamp(-128, 127).to(torch.int8)
@@ -89,7 +94,10 @@ def _dequantize_state(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     for k, v in sd.items():
         if k.endswith(".scale"):
             continue
-        out[k] = v.float() * float(sd[k + ".scale"].item())
+        if k + ".scale" in sd:
+            out[k] = v.float() * float(sd[k + ".scale"].item())
+        else:
+            out[k] = v  # stocké exact (vecteur/scalaire)
     return out
 
 
@@ -161,14 +169,8 @@ class ExpertPager:
         self.routers[block_idx] = router
 
     # ── Snapshot initial : tout le modèle → disque ─────────────────
-    def snapshot_router(self, block_idx: int, router: "PagedHashExpertRouter"):
-        dense_tc = router.dense_tc_weight  # (E*D, D) source de vérité initiale
-        D = router.hidden_dim
-        for e in range(router.n_experts):
-            sd = {f"expert.{k}": v.detach().cpu().clone()
-                  for k, v in router.dense_experts[e].state_dict().items()}
-            sd["tc_slice"] = dense_tc[e * D:(e + 1) * D].detach().cpu().clone()
-            self.store.save_page(block_idx, e, sd)
+    def snapshot_router(self, block_idx: int, router):
+        router.snapshot_pages(self)
 
     # ── Chemin chaud ───────────────────────────────────────────────
     def _sim_io(self):
@@ -180,17 +182,8 @@ class ExpertPager:
         return self.store.load_page(*page)
 
     def _install(self, page: PageId, sd: Dict[str, torch.Tensor], slot: int):
-        """Copie page → slot (in-place, REQUIRES_GRAD selon frozen)."""
-        b, _ = page
-        router = self.routers[b]
-        frozen = router.frozen_pages is not None and page[1] in router.frozen_pages
-        router.slots[slot].load_state_dict(
-            {k.split("expert.", 1)[1]: v for k, v in sd.items() if k.startswith("expert.")},
-            strict=True)
-        router.slot_tc[slot].data.copy_(sd["tc_slice"])
-        for p in router.slots[slot].parameters():
-            p.requires_grad = not frozen
-        router.slot_tc[slot].requires_grad = not frozen
+        """Copie page → slot (délégué au router : dense, associatif, ...)."""
+        self.routers[page[0]].install_page(page, sd, slot)
 
     def _free_slot(self, block: int, n_slots: int) -> Optional[int]:
         taken = {s for (bb, s), _ in self.page_of_slot.items() if bb == block}
@@ -213,10 +206,7 @@ class ExpertPager:
         return None
 
     def _writeback(self, page: PageId, block: int, slot: int):
-        router = self.routers[block]
-        sd = {f"expert.{k}": v.detach().cpu().clone()
-              for k, v in router.slots[slot].state_dict().items()}
-        sd["tc_slice"] = router.slot_tc[slot].detach().cpu().clone()
+        sd = self.routers[block].read_slot(slot)
         self.store.save_page(*page, sd)
         self.dirty.discard(page)
         self.stats["writebacks"] += 1
@@ -229,6 +219,9 @@ class ExpertPager:
         router = self.routers[block]
         S = router.n_slots
         slot_map: Dict[PageId, int] = {}
+        # Résidentes d'abord : évite d'évincer (LRU) les pages qu'on va toucher
+        # juste après — pathologie du balayage séquentiel (hits=0 sinon).
+        pages = sorted(pages, key=lambda p: p not in self.resident)
         with self.lock:
             for p in pages:
                 self.usage_ema[p] = 0.9 * self.usage_ema.get(p, 0.0) + 0.1
@@ -544,8 +537,41 @@ class PagedHashExpertRouter(nn.Module):
     def frozen_pages(self, v):
         self._frozen_set = set(v or ())
 
+    # ── Codec de page dense (substituable : cf. PagedAssocExpertRouter) ──
+    def snapshot_pages(self, pager):
+        """Vide le contenu dense initial → disque (source de vérité initiale)."""
+        dense_tc = self.dense_tc_weight  # (E*D, D)
+        D = self.hidden_dim
+        for e in range(self.n_experts):
+            sd = {f"expert.{k}": v.detach().cpu().clone()
+                  for k, v in self.dense_experts[e].state_dict().items()}
+            sd["tc_slice"] = dense_tc[e * D:(e + 1) * D].detach().cpu().clone()
+            pager.store.save_page(self.block_idx, e, sd)
+
+    def install_page(self, page, sd, slot: int):
+        """Copie page → slot (in-place, REQUIRES_GRAD selon frozen)."""
+        frozen = self.frozen_pages is not None and page[1] in self.frozen_pages
+        self.slots[slot].load_state_dict(
+            {k.split("expert.", 1)[1]: v for k, v in sd.items() if k.startswith("expert.")},
+            strict=True)
+        self.slot_tc[slot].data.copy_(sd["tc_slice"])
+        for p in self.slots[slot].parameters():
+            p.requires_grad = not frozen
+        self.slot_tc[slot].requires_grad = not frozen
+
+    def read_slot(self, slot: int):
+        """Clone slot → dict (writeback)."""
+        sd = {f"expert.{k}": v.detach().cpu().clone()
+              for k, v in self.slots[slot].state_dict().items()}
+        sd["tc_slice"] = self.slot_tc[slot].detach().cpu().clone()
+        return sd
+
     def set_batch_token_ids(self, ids):
         self._batch_token_ids = ids
+
+    @property
+    def supports_id_prefetch(self) -> bool:
+        return self.mode == "token"
 
     def assign_pages(self, x: torch.Tensor, token_ids=None) -> torch.Tensor:
         if self.mode == "token":
@@ -636,9 +662,11 @@ def hash_ahead_pages(next_token_ids: torch.Tensor, model: CogNetMoE1B) -> List[P
     pages: Set[PageId] = set()
     for b, blk in enumerate(model.blocks):
         r = blk.cognitive_expert_router
-        if not isinstance(r, PagedHashExpertRouter) or r.mode != "token":
+        # Polymorphe : dense-token et associatif exposent assign_pages(ids).
+        # (Dense-LSH : pas de prefetch exact par ids → working_set_hint.)
+        if not getattr(r, "supports_id_prefetch", False):
             continue
-        a = token_hash_experts(next_token_ids, r.n_experts, r.top_k, r.salt)
+        a = r.assign_pages(next_token_ids, next_token_ids)
         for e in set(a.reshape(-1).tolist()):
             pages.add((b, e))
     return sorted(pages)

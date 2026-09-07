@@ -1,0 +1,122 @@
+{
+ "seed0": {
+  "ASSOC": {
+   "eval": 3.5540129423141478,
+   "init_eval": 4.184536492824554,
+   "tokens": 200192,
+   "time_s": 13.6694815158844,
+   "tok_s": 14645.178733909559,
+   "usage": [
+    0.204,
+    0.257,
+    0.265,
+    0.274
+   ],
+   "trainable": 39104,
+   "pager": {
+    "hits": 3121,
+    "faults_sync": 644,
+    "faults_covered": 3120,
+    "faults_waited": 0,
+    "evictions": 3760,
+    "writebacks": 1560,
+    "joker_fallbacks": 0,
+    "stall_ms": 394.777774810791
+   }
+  },
+  "HASH-TOKEN": {
+   "eval": 1.8900618493556975,
+   "init_eval": 4.185878157615662,
+   "tokens": 200192,
+   "time_s": 8.566725969314575,
+   "tok_s": 23368.55418476954,
+   "usage": [
+    0.408,
+    0.514,
+    0.529,
+    0.549
+   ],
+   "trainable": 268992
+  }
+ },
+ "seed1": {
+  "ASSOC": {
+   "eval": 3.550239008665085,
+   "init_eval": 4.188672196865082,
+   "tokens": 200192,
+   "time_s": 12.852893352508545,
+   "tok_s": 15575.636902093163,
+   "usage": [
+    0.204,
+    0.257,
+    0.265,
+    0.274
+   ],
+   "trainable": 39104,
+   "pager": {
+    "hits": 3120,
+    "faults_sync": 644,
+    "faults_covered": 3120,
+    "faults_waited": 3,
+    "evictions": 3760,
+    "writebacks": 1560,
+    "joker_fallbacks": 0,
+    "stall_ms": 380.11717796325684
+   }
+  },
+  "HASH-TOKEN": {
+   "eval": 1.9070113927125931,
+   "init_eval": 4.15846837759018,
+   "tokens": 200192,
+   "time_s": 8.343916654586792,
+   "tok_s": 23992.5694715504,
+   "usage": [
+    0.408,
+    0.514,
+    0.529,
+    0.549
+   ],
+   "trainable": 268992
+  }
+ },
+ "seed2": {
+  "ASSOC": {
+   "eval": 3.564295065402985,
+   "init_eval": 4.166668152809143,
+   "tokens": 200192,
+   "time_s": 12.971097469329834,
+   "tok_s": 15433.697917493419,
+   "usage": [
+    0.204,
+    0.257,
+    0.265,
+    0.274
+   ],
+   "trainable": 39104,
+   "pager": {
+    "hits": 3120,
+    "faults_sync": 644,
+    "faults_covered": 3120,
+    "faults_waited": 0,
+    "evictions": 3760,
+    "writebacks": 1560,
+    "joker_fallbacks": 0,
+    "stall_ms": 392.2243118286133
+   }
+  },
+  "HASH-TOKEN": {
+   "eval": 1.8202507227659226,
+   "init_eval": 4.140041637420654,
+   "tokens": 200192,
+   "time_s": 8.671356916427612,
+   "tok_s": 23086.582864642853,
+   "usage": [
+    0.408,
+    0.514,
+    0.529,
+    0.549
+   ],
+   "trainable": 268992
+  }
+ }
+}

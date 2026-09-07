@@ -94,6 +94,8 @@ TokenEncoder (RoPE + RMSNorm, separable for EDT Phase 2b)
 | `HASH_ROUTING_REPORT.md` | Hash routing verdict (French) |
 | `expert_pager.py` | Disk pagination of experts (LRU + async prefetch, bit-exact) |
 | `EXPERT_PAGER_REPORT.md` | Pager verdict + latency-masking anatomy (French) |
+| `assoc_experts.py` + `assoc_experiment.py` | Gradient-free associative experts (Hebbian, paged) |
+| `ASSOC_EXPERTS_REPORT.md` | Assoc substitution verdict (French) |
 | `training_time_estimate.json` | Training time estimates (RTX 3090/4090, A100, H100, H200) |
 | `CogNet-MoE-1B_Whitepaper.pdf` | Technical whitepaper (French, 18 pages) |
 | `source/` | Original CogNet-1B code (cloned from GitHub) |
