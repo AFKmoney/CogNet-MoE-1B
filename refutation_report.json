@@ -1,0 +1,229 @@
+{
+  "volet0": {
+    "floor": 3.890198199194831,
+    "eval_loss": 1.7800157964229584,
+    "leaked": true
+  },
+  "volet1": [
+    {
+      "arm": "SCRATCH",
+      "seed": 0,
+      "eval_probe": 2.8898220300674438,
+      "eval_new_pattern": 4.252636504173279,
+      "usage": [
+        0.52,
+        0.463,
+        0.512,
+        0.504
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.9508508384227753,
+      "tokens": {
+        "phase1": 0,
+        "phase2a": 0,
+        "phase2b": 0,
+        "probe": 199680
+      },
+      "total_tokens": 199680,
+      "time_s": 9.0
+    },
+    {
+      "arm": "EDT-V2",
+      "seed": 0,
+      "eval_probe": 3.479333299398422,
+      "eval_new_pattern": 4.248595881462097,
+      "usage": [
+        0.498,
+        0.488,
+        0.45,
+        0.564
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.8419703483581543,
+      "tokens": {
+        "phase1": 41216,
+        "phase2a": 12800,
+        "phase2b": 20224,
+        "probe": 125440
+      },
+      "total_tokens": 199680,
+      "time_s": 10.1
+    },
+    {
+      "arm": "EDT-NOFIX",
+      "seed": 0,
+      "eval_probe": 3.4507586479187013,
+      "eval_new_pattern": 4.2405230581760405,
+      "usage": [
+        0.549,
+        0.492,
+        0.449,
+        0.509
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.8507919490337372,
+      "tokens": {
+        "phase1": 41216,
+        "phase2a": 256,
+        "phase2b": 20224,
+        "probe": 138240
+      },
+      "total_tokens": 199936,
+      "time_s": 7.6
+    },
+    {
+      "arm": "P1-ONLY",
+      "seed": 0,
+      "eval_probe": 2.367085021734238,
+      "eval_new_pattern": 4.278379321098328,
+      "usage": [
+        0.515,
+        0.471,
+        0.538,
+        0.477
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.9054899215698242,
+      "tokens": {
+        "phase1": 41216,
+        "phase2a": 0,
+        "phase2b": 0,
+        "probe": 158720
+      },
+      "total_tokens": 199936,
+      "time_s": 7.9
+    },
+    {
+      "arm": "P2B-ONLY",
+      "seed": 0,
+      "eval_probe": 3.2213289976119994,
+      "eval_new_pattern": 4.267401176691055,
+      "usage": [
+        0.545,
+        0.48,
+        0.505,
+        0.47
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.9300675809383392,
+      "tokens": {
+        "phase1": 0,
+        "phase2a": 0,
+        "phase2b": 20224,
+        "probe": 179712
+      },
+      "total_tokens": 199936,
+      "time_s": 8.5
+    },
+    {
+      "arm": "SCRATCH",
+      "seed": 1,
+      "eval_probe": 2.8956669509410857,
+      "eval_new_pattern": 4.232366961240769,
+      "usage": [
+        0.497,
+        0.525,
+        0.429,
+        0.549
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.943873530626297,
+      "tokens": {
+        "phase1": 0,
+        "phase2a": 0,
+        "phase2b": 0,
+        "probe": 199680
+      },
+      "total_tokens": 199680,
+      "time_s": 9.1
+    },
+    {
+      "arm": "EDT-V2",
+      "seed": 1,
+      "eval_probe": 3.585865265130997,
+      "eval_new_pattern": 4.260139298439026,
+      "usage": [
+        0.609,
+        0.479,
+        0.425,
+        0.487
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.8355635166168213,
+      "tokens": {
+        "phase1": 41216,
+        "phase2a": 12800,
+        "phase2b": 20224,
+        "probe": 125440
+      },
+      "total_tokens": 199680,
+      "time_s": 10.1
+    },
+    {
+      "arm": "EDT-NOFIX",
+      "seed": 1,
+      "eval_probe": 3.4944917440414427,
+      "eval_new_pattern": 4.1996747851371765,
+      "usage": [
+        0.48,
+        0.546,
+        0.422,
+        0.552
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.8452036559581757,
+      "tokens": {
+        "phase1": 41216,
+        "phase2a": 256,
+        "phase2b": 20224,
+        "probe": 138240
+      },
+      "total_tokens": 199936,
+      "time_s": 7.4
+    },
+    {
+      "arm": "P1-ONLY",
+      "seed": 1,
+      "eval_probe": 2.4151078909635544,
+      "eval_new_pattern": 4.240109395980835,
+      "usage": [
+        0.463,
+        0.54,
+        0.476,
+        0.521
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.8986212730407714,
+      "tokens": {
+        "phase1": 41216,
+        "phase2a": 0,
+        "phase2b": 0,
+        "probe": 158720
+      },
+      "total_tokens": 199936,
+      "time_s": 7.8
+    },
+    {
+      "arm": "P2B-ONLY",
+      "seed": 1,
+      "eval_probe": 3.2642625272274017,
+      "eval_new_pattern": 4.250796163082123,
+      "usage": [
+        0.496,
+        0.576,
+        0.428,
+        0.501
+      ],
+      "dead_experts": 0,
+      "behav_diversity": 0.9264082729816436,
+      "tokens": {
+        "phase1": 0,
+        "phase2a": 0,
+        "phase2b": 20224,
+        "probe": 179712
+      },
+      "total_tokens": 199936,
+      "time_s": 8.5
+    }
+  ]
+}
