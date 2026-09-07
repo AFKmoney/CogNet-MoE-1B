@@ -1,0 +1,10 @@
+# Coeur (obligatoire)
+torch>=2.0
+numpy
+tokenizers>=0.13      # BPE 16k réel (--tokenizer) ; la démo marche sans (byte fallback)
+
+# Pagination d'experts sur disque (expert_pager.py uniquement)
+safetensors
+
+# Optionnel (GPU) : fallback AdamW automatique si absent
+# bitsandbytes
