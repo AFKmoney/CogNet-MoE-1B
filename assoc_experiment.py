@@ -106,7 +106,7 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
                 if bind_alpha > 0:  # embedding du label, détaché (cible)
                     le = model.encoder.token_emb(y).repeat_interleave(T, dim=0)
             re = None
-            if readout == "delta":  # crédit exact 1-couche, par formule (0 graphe)
+            if readout in ("delta", "mlp"):  # crédit exact 1-couche (0 graphe)
                 re, _ = head_credit(head, h.detach(), y)
                 if delta_blocks != "hybrid":
                     le = None  # delta subsumes le binding (cibles en conflit sinon)
@@ -115,7 +115,7 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
                 r = blk.cognitive_expert_router
                 ly = y if vigilance > 0 else None
                 re_b, le_b = re, le
-                if readout == "delta" and delta_blocks in ("last", "hybrid") \
+                if readout in ("delta", "mlp") and delta_blocks in ("last", "hybrid") \
                         and bi < nblocks - 1:
                     re_b = None  # blocs amont : pas de crédit (Jacobien non-identité)
                     if delta_blocks == "last":
@@ -134,7 +134,7 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
 def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
             n_mem_slots=8, window=4, bind_alpha=0.0, vigilance=0.0, mode="token",
             novelty_gamma=0.0, readout="legacy", eta=0.05, delta_blocks="all",
-            binary=False):
+            binary=False, mlp_hidden=16):
     t0 = time.time()
     counter = TokenCounter()
     pattern = make_pattern(pattern_seed)
@@ -148,7 +148,10 @@ def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
         pager = ExpertPager(PagerConfig(store_dir=f"/tmp/assoc_exp_{seed}", num_loaders=4))
         model = convert_to_assoc(trunk, n_slots=2, pager=pager, n_mem_slots=n_mem_slots,
                                  window=window, seed=seed, n_labels=VPROBE, mode=mode,
-                                 binary_addressing=binary)
+                                 binary_addressing=binary,
+                                 readout_mode=(readout if readout in ("delta", "mlp")
+                                               else "legacy"),
+                                 mlp_hidden=mlp_hidden)
     else:
         model = convert_to_hash(trunk, mode="token")
     ntrain = sum(p.numel() for p in list(model.parameters()) + list(head.parameters())
@@ -212,8 +215,12 @@ def ablate():
     print("=" * 70)
     print("Ablation seed-0 : M/W × binding label (200k tokens chacun)")
     print("=" * 70)
-    for tag, kw in [("bin-v3", {"readout": "delta", "delta_blocks": "last",
-                               "eta": 0.1, "binary": True})]:
+    for tag, kw in [("mlp-H16", {"readout": "mlp", "delta_blocks": "last",
+                               "eta": 0.1}),
+                    ("mlp-H16-eta.05", {"readout": "mlp", "delta_blocks": "last",
+                                        "eta": 0.05}),
+                    ("mlp-H32", {"readout": "mlp", "delta_blocks": "last",
+                                 "eta": 0.1, "mlp_hidden": 32})]:
         a = run_arm("ASSOC", 0, TOKENS, **kw)
         p = a["pager"]
         print(f"  {tag:12s}: eval={a['eval']:.4f} tok/s={a['tok_s']:.0f} "

@@ -177,6 +177,34 @@ avec D (travail production identifié, pas faké). Le gain v1 = mémoire + rési
 cache (clés 2 Ko → 64 o par page, tient en L1) + repli exact. Cache `keys_bits`
 par slot (repack au Hebb uniquement) : pas de repack au retrieval.
 
+## 11. v4 — Readout MLP local (résidu non-linéaire, gain modeste mais cohérent)
+
+`o = v + A·d + V·SiLU(U·d)` par slot, dernier bloc seul. Backprop LOCALE exacte
+(formules closes : δV = δ⊗h, δU = (Vᵀδ⊙σ′)⊗d — 0 graphe global, 0 Adam expert).
+Deux pièges documentés avant le gain :
+
+| Étape seed-0 | Résultat | Diagnostic |
+|---|---|---|
+| MLP *remplaçant* le linéaire | 3.03–3.06 vs 2.88 | **Piège bootstrap** : δU ∝ V, δV ∝ h, tous deux ~0 à l'init → U/V random-walkent (≈2.7e-4/step), seul v apprend → plus faible que le delta linéaire (dont l'entrée d a norme ~8 vs h~0.15) |
+| Résidu + V aléatoire ×0.05 | 2.97 | Bruit d'init MLP dans la sortie partagée |
+| Résidu + **V=0** (style ControlNet) | 2.885 = v3 | Équivalence v3 exacte à t=0 ; U aléatoire bootstrappe V |
+
+| 3 seeds (200k, inits appariées) | seed-0 | seed-1 | seed-2 | Moy |
+|---|---|---|---|---|
+| v3 linéaire (`assoc_results.json`) | 2.8893 | 2.9117 | 2.8518 | 2.8843 |
+| v4 mlp-H16 | 2.8852 | 2.9059 | 2.8442 | **2.8784 (Δ −0.006, 3/3 même signe)** |
+| v4 mlp-H32 | 2.8739 | 2.9139 | 2.8529 | 2.8802 (Δ −0.004, bruité) |
+
+Mécanisme (normes finales H32/seed-2) : U gelé à l'init (±1 %), V 0→0.27,
+A 1.8, v 0.45 → v4 = v3 + random-features SiLU à readout appris (style ELM,
+100 % local). U ne dégèle jamais en 200k tokens : le piège à deux échelles
+persiste pour la couche 1. Honnête : le non-linéaire mord mais le mur est
+l'efficacité-échantillon, pas la capacité (3/3 signes à H16 : p≈1/8, suggestif,
+pas conclusif). Coût : +M·H·D·2 fp32/page (H16 : +64 Ko).
+**Loi** : un readout non-linéaire doit démarrer NUL (résidu zéro-init) sinon son
+bruit d'init pollue le socle ; en 200k tokens le gain vient des features
+aléatoires, pas d'un U appris.
+
 ## 7. Usage
 
 ```bash

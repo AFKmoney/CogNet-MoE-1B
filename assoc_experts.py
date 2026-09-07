@@ -154,7 +154,9 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
                    amaps: Optional[torch.Tensor] = None,
                    centers: Optional[torch.Tensor] = None,
                    binary: bool = False, tau: float = 8.0,
-                   keys_bits: Optional[torch.Tensor] = None):
+                   keys_bits: Optional[torch.Tensor] = None,
+                   mlp_u: Optional[torch.Tensor] = None,
+                   mlp_v: Optional[torch.Tensor] = None):
     """
     q (N,D) → out (N,D) + poids (N,W) + gagnants (N,) + codes z (N,D) + replis.
     Readout v3 : o_s = v_s + A_s(q−c_s) (cartes locales, None = lookup pur).
@@ -183,10 +185,16 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
         scores = (z.unsqueeze(1) * k).sum(-1) / math.sqrt(D)
     w = torch.softmax(scores, -1).to(q.dtype)
     v = values.float()[idx]  # (N,W,D)
-    if amaps is not None and centers is not None:  # cartes locales v3
+    d = None
+    if centers is not None:
         d = q.float().unsqueeze(1) - centers.float()[idx]  # (N,W,D)
+    if amaps is not None and d is not None:  # v3 : carte linéaire (socle prouvé)
         corr = (amaps.float()[idx] @ d.unsqueeze(-1)).squeeze(-1)
         v = v + corr
+    if mlp_u is not None and mlp_v is not None and d is not None:  # v4 : résidu MLP
+        pre = (mlp_u.float()[idx] @ d.unsqueeze(-1)).squeeze(-1)  # (N,W,H)
+        h = torch.nn.functional.silu(pre)
+        v = v + (mlp_v.float()[idx] @ h.unsqueeze(-1)).squeeze(-1)
     out = (w.unsqueeze(-1) * v).sum(1).to(q.dtype)
     order = scores.argsort(dim=-1, descending=True)  # rangs de similarité
     ar = torch.arange(N, device=q.device)
@@ -221,7 +229,9 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
                    sample_weight: Optional[torch.Tensor] = None,
                    readout_err: Optional[torch.Tensor] = None,
                    amaps: Optional[torch.Tensor] = None,
-                   centers: Optional[torch.Tensor] = None):
+                   centers: Optional[torch.Tensor] = None,
+                   mlp_u: Optional[torch.Tensor] = None,
+                   mlp_v: Optional[torch.Tensor] = None):
     """
     Superposition directe WTA-EMA (vectorisée) — in-place, sans gradient.
     Gagnants multiples sur le même slot : moyenne des cibles d'abord.
@@ -253,24 +263,46 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
     sumq.index_add_(0, winners, q.float() * sw.unsqueeze(-1))
     tz = sumz[mask] / cnt[mask].unsqueeze(-1)
     tq = sumq[mask] / cnt[mask].unsqueeze(-1)
-    if readout_err is not None:  # v3 : delta-rule WTA sur le readout
-        assert amaps is not None and centers is not None
+    if readout_err is not None:  # delta : v + A (v3) + U/V (v4), même δ (exact)
+        # v4 : backprop LOCALE exacte (2 couches, formules closes, 0 graphe).
+        # o = v + A·d + V·silu(U·d) ; δA/δU/δV/δv par token, agrégés par gagnant.
+        assert centers is not None
+        cw = centers.float()[winners]
+        dd = q.float() - cw  # (N,D)
+        M_, D_ = keys.shape[0], q.shape[1]
+        swu = sw.unsqueeze(-1)
         sume = torch.zeros_like(values.float())
-        sume.index_add_(0, winners, readout_err.float() * sw.unsqueeze(-1))
-        de = sume[mask] / cnt[mask].unsqueeze(-1)  # erreur moyenne/slot
-        # Covariance E[δ⊗(q−c)] par slot (PAS l'outer des moyennes : les erreurs
-        # s'annuleraient et rien ne serait appris — delta-rule correcte).
-        cw = centers.float()[winners]  # (N,D) centre du gagnant de chaque token
-        dd = q.float() - cw
-        sumo = torch.zeros(mask.shape[0], values.shape[1] * values.shape[1],
-                           device=q.device)
-        oo = (readout_err.float().unsqueeze(-1) * dd.unsqueeze(-2)).reshape(
-            winners.shape[0], -1)
-        sumo.index_add_(0, winners, oo * sw.unsqueeze(-1))
-        cov = (sumo[mask] / cnt[mask].unsqueeze(-1)).reshape(
-            -1, values.shape[1], values.shape[1])
+        sume.index_add_(0, winners, readout_err.float() * swu)
+        de = sume[mask] / cnt[mask].unsqueeze(-1)
+        if mlp_u is not None and mlp_v is not None:  # v4 : raffinement MLP
+            H_ = mlp_u.shape[1]
+            pre = (mlp_u.float()[winners] @ dd.unsqueeze(-1)).squeeze(-1)  # (N,H)
+            sig = torch.sigmoid(pre)
+            h = pre * sig  # silu
+            dsp = sig * (1.0 + pre * (1.0 - sig))  # silu'
+            sumV = torch.zeros(M_, D_ * H_, device=q.device)
+            oV = (readout_err.float().unsqueeze(-1) * h.unsqueeze(-2)).reshape(
+                winners.shape[0], -1)
+            sumV.index_add_(0, winners, oV * sw.unsqueeze(-1))
+            dh = (mlp_v.float()[winners].transpose(-1, -2)
+                  @ readout_err.float().unsqueeze(-1)).squeeze(-1) * dsp  # (N,H)
+            sumU = torch.zeros(M_, H_ * D_, device=q.device)
+            oU = (dh.unsqueeze(-1) * dd.unsqueeze(-2)).reshape(winners.shape[0], -1)
+            sumU.index_add_(0, winners, oU * sw.unsqueeze(-1))
+            dV = (sumV[mask] / cnt[mask].unsqueeze(-1)).reshape(-1, D_, H_)
+            dU = (sumU[mask] / cnt[mask].unsqueeze(-1)).reshape(-1, H_, D_)
+            mlp_v[mask] = (mlp_v.float()[mask] - eta * dV).to(mlp_v.dtype)
+            mlp_u[mask] = (mlp_u.float()[mask] - eta * dU).to(mlp_u.dtype)
+        if amaps is not None:  # v3 : covariance E[δ⊗(q−c)]
+            sumo = torch.zeros(mask.shape[0], values.shape[1] * values.shape[1],
+                               device=q.device)
+            oo = (readout_err.float().unsqueeze(-1) * dd.unsqueeze(-2)).reshape(
+                winners.shape[0], -1)
+            sumo.index_add_(0, winners, oo * sw.unsqueeze(-1))
+            cov = (sumo[mask] / cnt[mask].unsqueeze(-1)).reshape(
+                -1, values.shape[1], values.shape[1])
+            amaps[mask] = (amaps.float()[mask] - eta * cov).to(amaps.dtype)
         values[mask] = (values.float()[mask] - eta * de).to(values.dtype)
-        amaps[mask] = (amaps.float()[mask] - eta * cov).to(amaps.dtype)
         centers[mask] = (centers.float()[mask]
                          + eta * (tq - centers.float()[mask])).to(centers.dtype)
     elif label_emb is not None:  # legacy : binding HDC requête⊕label
@@ -281,7 +313,7 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
         label_hist[winners, label_ids] += 1
     keys[mask] = F.normalize(keys.float()[mask] + eta * (tz - keys.float()[mask]),
                              dim=-1).to(keys.dtype)
-    if readout_err is None:  # legacy : values attractées (delta gère v sinon)
+    if readout_err is None:  # legacy : values attractées (delta/MLP gèrent v sinon)
         values[mask] = (values.float()[mask]
                         + eta * (tq - values.float()[mask])).to(values.dtype)
     counts[mask] = counts.float()[mask] + cnt[mask].to(counts.dtype)
@@ -295,7 +327,8 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
 class AssocSlot(nn.Module):
     """Un slot = une mémoire associative résidente (buffers, jamais de grad)."""
 
-    def __init__(self, hidden_dim: int, n_mem_slots: int, n_labels: int = 64):
+    def __init__(self, hidden_dim: int, n_mem_slots: int, n_labels: int = 64,
+                 mlp_hidden: int = 16):
         super().__init__()
         nw = max(1, (hidden_dim + 63) // 64)
         self.register_buffer("keys", torch.zeros(n_mem_slots, hidden_dim))
@@ -309,6 +342,9 @@ class AssocSlot(nn.Module):
         # Readout v3 : carte locale o = v + A(q−c) par slot (zéro-init = lookup).
         self.register_buffer("amaps", torch.zeros(n_mem_slots, hidden_dim, hidden_dim))
         self.register_buffer("centers", torch.zeros(n_mem_slots, hidden_dim))
+        # Readout v4 : MLP local o = v + V·SiLU(U(q−c)) (2k params/slot à H=16).
+        self.register_buffer("mlp_u", torch.zeros(n_mem_slots, mlp_hidden, hidden_dim))
+        self.register_buffer("mlp_v", torch.zeros(n_mem_slots, hidden_dim, mlp_hidden))
 
 
 class PagedAssocExpertRouter(nn.Module):
@@ -325,11 +361,15 @@ class PagedAssocExpertRouter(nn.Module):
                  frozen_pages: Optional[Set[int]] = None,
                  n_labels: int = 64, mode: str = "token",
                  n_bits: int = 24, lsh_seed: int = 1234,
-                 binary_addressing: bool = False, binary_tau: float = 8.0):
+                 binary_addressing: bool = False, binary_tau: float = 8.0,
+                 readout_mode: str = "legacy", mlp_hidden: int = 16):
         super().__init__()
         assert top_k <= n_experts
         assert mode in ("token", "lsh")
+        assert readout_mode in ("legacy", "delta", "mlp")
         self.mode = mode
+        self.readout_mode = readout_mode
+        self.mlp_hidden = mlp_hidden
         self.hidden_dim = hidden_dim
         self.n_experts = n_experts
         self.num_channels = n_experts  # alias compat
@@ -342,7 +382,8 @@ class PagedAssocExpertRouter(nn.Module):
         self.pager = pager
         self.salt = salt
         self._frozen_pages = set(frozen_pages or ())
-        self.slots = nn.ModuleList([AssocSlot(hidden_dim, n_mem_slots, n_labels)
+        self.slots = nn.ModuleList([AssocSlot(hidden_dim, n_mem_slots, n_labels,
+                                              mlp_hidden)
                                     for _ in range(n_slots)])
         self.lsh = (LSHHasher(hidden_dim, n_bits, lsh_seed + block_idx)
                     if mode == "lsh" else None)
@@ -381,7 +422,11 @@ class PagedAssocExpertRouter(nn.Module):
                        "counts": torch.zeros(M),
                        "label_hist": torch.zeros(M, self.n_labels, dtype=torch.int32),
                        "amaps": torch.zeros(M, D, D),  # cartes nulles = lookup pur
-                       "centers": torch.zeros(M, D)})
+                       "centers": torch.zeros(M, D),
+                       "mlp_u": torch.randn(M, self.mlp_hidden, D, generator=g) * 0.05,
+                       "mlp_v": torch.zeros(M, D, self.mlp_hidden)})  # V=0 : nul à t=0
+            # (équivalence v3 exacte au démarrage ; U aléatoire bootstrappe V,
+            # puis V débloque U — init résiduelle style ControlNet).
             pager.store.save_page(self.block_idx, e, sd)
 
     def install_page(self, page: PageId, sd: Dict[str, torch.Tensor], slot: int):
@@ -403,8 +448,8 @@ class PagedAssocExpertRouter(nn.Module):
             s.label_hist.copy_(sd["label_hist"].to(s.label_hist.dtype))
         else:
             s.label_hist.zero_()
-        for k in ("amaps", "centers"):  # compat v2 → v3 (lookup pur)
-            if k in sd:
+        for k in ("amaps", "centers", "mlp_u", "mlp_v"):  # compat (lookup pur)
+            if k in sd and sd[k].shape == tuple(getattr(s, k).shape):
                 getattr(s, k).copy_(sd[k].to(getattr(s, k).dtype))
             else:
                 getattr(s, k).zero_()
@@ -422,7 +467,9 @@ class PagedAssocExpertRouter(nn.Module):
                    "counts": s.counts.detach().cpu().clone(),
                    "label_hist": s.label_hist.detach().cpu().clone(),
                    "amaps": s.amaps.detach().cpu().clone(),
-                   "centers": s.centers.detach().cpu().clone()})
+                   "centers": s.centers.detach().cpu().clone(),
+                   "mlp_u": s.mlp_u.detach().cpu().clone(),
+                   "mlp_v": s.mlp_v.detach().cpu().clone()})
         return sd
 
     # ── Adressage / forward ──────────────────────────────────────
@@ -495,7 +542,9 @@ class PagedAssocExpertRouter(nn.Module):
                             label_hist=slot.label_hist if y_exp is not None else None,
                             rho=self._rho, amaps=slot.amaps, centers=slot.centers,
                             binary=self.binary_addressing, tau=self.binary_tau,
-                            keys_bits=slot.keys_bits if self.binary_addressing else None)
+                            keys_bits=slot.keys_bits if self.binary_addressing else None,
+                            mlp_u=slot.mlp_u if self.readout_mode == "mlp" else None,
+                            mlp_v=slot.mlp_v if self.readout_mode == "mlp" else None)
                         self._fallbacks += fb
                         combined[sel] += w[sel, k].unsqueeze(-1).to(out_k.dtype) * out_k
         out = self.norm(combined.view(B, T, D))
@@ -562,7 +611,9 @@ class PagedAssocExpertRouter(nn.Module):
                     label_hist=slot.label_hist if y_exp is not None else None,
                     rho=rho, amaps=slot.amaps, centers=slot.centers,
                     binary=self.binary_addressing, tau=self.binary_tau,
-                    keys_bits=slot.keys_bits if self.binary_addressing else None)
+                    keys_bits=slot.keys_bits if self.binary_addressing else None,
+                    mlp_u=slot.mlp_u if self.readout_mode == "mlp" else None,
+                    mlp_v=slot.mlp_v if self.readout_mode == "mlp" else None)
                 self._fallbacks += fb
                 le = label_emb[sel] if label_emb is not None else None
                 ly = y_exp[sel] if y_exp is not None else None
@@ -571,10 +622,12 @@ class PagedAssocExpertRouter(nn.Module):
                     conf = w8.max(-1).values.float()
                     sw = 1.0 + novelty_gamma * (1.0 - conf)
                 re = readout_err[sel] if readout_err is not None else None
+                mu = slot.mlp_u if self.readout_mode == "mlp" else None
+                mv = slot.mlp_v if self.readout_mode == "mlp" else None
                 n += hebbian_update(slot.keys, slot.values, slot.counts,
                                     z, x_flat[sel], winners, eta, le, label_alpha,
                                     ly, slot.label_hist if y_exp is not None else None,
-                                    sw, re, slot.amaps, slot.centers)
+                                    sw, re, slot.amaps, slot.centers, mu, mv)
             if self.binary_addressing and n > 0:  # ombre a bougé → repack (M×D)
                 slot.keys_bits.copy_(pack_bits((slot.keys.detach() > 0).to(torch.int64)))
             touched[f"b{self.block_idx}e{e}"] = n
@@ -622,7 +675,8 @@ def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
                      frozen_pages: Optional[Set[int]] = None,
                      n_labels: int = 64, mode: str = "token",
                      lsh_seed: int = 1234, binary_addressing: bool = False,
-                     binary_tau: float = 8.0) -> CogNetMoE1B:
+                     binary_tau: float = 8.0, readout_mode: str = "legacy",
+                     mlp_hidden: int = 16) -> CogNetMoE1B:
     """Swap chaque router → associatif paginé (init pages directe sur disque)."""
     for b, blk in enumerate(model.blocks):
         legacy = blk.cognitive_expert_router
@@ -634,7 +688,8 @@ def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
                                    frozen_pages=set(frozen_pages or ()),
                                    n_labels=n_labels, mode=mode, lsh_seed=lsh_seed,
                                    binary_addressing=binary_addressing,
-                                   binary_tau=binary_tau)
+                                   binary_tau=binary_tau, readout_mode=readout_mode,
+                                   mlp_hidden=mlp_hidden)
         if hasattr(legacy, "norm"):
             with torch.no_grad():
                 r.norm.load_state_dict(legacy.norm.state_dict())
@@ -768,6 +823,51 @@ def self_test():
     print(f"  MSE carte locale : {m0:.3f} → {m1:.3f}")
     assert m1 < m0 * 0.2, "la delta-rule n'a pas appris la carte!"
     print("  ✓ DELTA-RULE APPREND UNE FONCTION (readout expressif, 0 backprop)")
+
+    # [2e] MLP local v4 : apprend une cible NON-LINÉAIRE (le linéaire échoue).
+    print("\n[2e] MLP local (non-linéarité, backprop locale exacte)...")
+    torch.manual_seed(4)
+    D5, M5, H5 = 8, 1, 16
+    proj5 = torch.eye(D5)
+    keys5 = F.normalize(torch.randn(M5, D5), dim=-1)
+    values5 = torch.zeros(M5, D5)
+    counts5 = torch.zeros(M5)
+    centers5 = torch.zeros(M5, D5)
+    mu5 = torch.randn(M5, H5, D5) * 0.01
+    mv5 = torch.randn(M5, D5, H5) * 0.01
+    Am5 = torch.zeros(M5, D5, D5)
+    # Cible non-linéaire : norme² (impossible en linéaire pur).
+    def tgt(qq):
+        return (qq ** 2).sum(-1, keepdim=True).expand_as(qq) * 0.3
+    def msel():
+        qq = torch.randn(256, D5)
+        oo, _, _, _, _ = assoc_retrieve(qq, proj5, keys5, values5,
+                                        torch.zeros(256, dtype=torch.long), 1,
+                                        amaps=Am5, centers=centers5)
+        return ((oo - tgt(qq)) ** 2).mean().item()
+    def msem():
+        qq = torch.randn(256, D5)
+        oo, _, _, _, _ = assoc_retrieve(qq, proj5, keys5, values5,
+                                        torch.zeros(256, dtype=torch.long), 1,
+                                        amaps=Am5, centers=centers5,
+                                        mlp_u=mu5, mlp_v=mv5)
+        return ((oo - tgt(qq)) ** 2).mean().item()
+    m0 = msem()
+    for step in range(600):
+        q = torch.randn(256, D5)
+        t = tgt(q)
+        o, _, winners, z, _ = assoc_retrieve(q, proj5, keys5, values5,
+                                             torch.zeros(256, dtype=torch.long), 1,
+                                             amaps=Am5, centers=centers5,
+                                             mlp_u=mu5, mlp_v=mv5)
+        hebbian_update(keys5, values5, counts5, z, q, winners, eta=0.05,
+                       readout_err=(o - t), amaps=Am5, centers=centers5,
+                       mlp_u=mu5, mlp_v=mv5)
+    m1 = msem()
+    print(f"  MSE non-linéaire : {m0:.3f} → {m1:.3f}")
+    assert m1 < m0 * 0.25, "le MLP local n'a pas appris!"  # ×4 mini : le
+    # résidu MLP + socle linéaire partagent δ ; l'init ×0.05 coûte ~0.5 %.
+    print("  ✓ MLP LOCAL APPREND LE NON-LINÉAIRE (0 graphe global)")
 
     # [2d] Adressage binaire : même convergence + Hamming plus rapide que dot.
     print("\n[2d] Hypervecteurs binaires (Hamming vs dot)...")
