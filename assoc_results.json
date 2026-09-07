@@ -1,125 +1,125 @@
 {
  "seed0": {
   "ASSOC": {
-   "eval": 3.5286618411540984,
-   "init_eval": 4.184536492824554,
+   "eval": 2.8825967609882355,
+   "init_eval": 4.162146043777466,
    "tokens": 200192,
-   "time_s": 17.14982318878174,
-   "tok_s": 11673.123261757715,
+   "time_s": 39.35893201828003,
+   "tok_s": 5086.316872292723,
    "usage": [
     0.204,
     0.257,
     0.265,
     0.274
    ],
-   "trainable": 39104,
+   "trainable": 39168,
    "pager": {
-    "hits": 3120,
-    "faults_sync": 644,
-    "faults_covered": 3120,
-    "faults_waited": 3,
+    "hits": 2340,
+    "faults_sync": 1422,
+    "faults_covered": 2342,
+    "faults_waited": 5,
     "evictions": 3760,
-    "writebacks": 1560,
+    "writebacks": 780,
     "joker_fallbacks": 0,
-    "stall_ms": 475.07691383361816
+    "stall_ms": 451.59077644348145
    },
    "art_fallbacks": 0
   },
   "HASH-TOKEN": {
-   "eval": 1.8900618493556975,
-   "init_eval": 4.185878157615662,
+   "eval": 1.8975635647773743,
+   "init_eval": 4.176050746440888,
    "tokens": 200192,
-   "time_s": 9.814696311950684,
-   "tok_s": 20397.167027597166,
+   "time_s": 9.815767288208008,
+   "tok_s": 20394.941538650473,
    "usage": [
     0.408,
     0.514,
     0.529,
     0.549
    ],
-   "trainable": 268992
+   "trainable": 269056
   }
  },
  "seed1": {
   "ASSOC": {
-   "eval": 3.538679975271225,
-   "init_eval": 4.188672196865082,
+   "eval": 2.911730581521988,
+   "init_eval": 4.198744690418243,
    "tokens": 200192,
-   "time_s": 16.112547159194946,
-   "tok_s": 12424.60289003756,
+   "time_s": 39.70230412483215,
+   "tok_s": 5042.326998719154,
    "usage": [
     0.204,
     0.257,
     0.265,
     0.274
    ],
-   "trainable": 39104,
+   "trainable": 39168,
    "pager": {
-    "hits": 3120,
-    "faults_sync": 644,
-    "faults_covered": 3120,
+    "hits": 2341,
+    "faults_sync": 1422,
+    "faults_covered": 2342,
     "faults_waited": 7,
     "evictions": 3760,
-    "writebacks": 1560,
+    "writebacks": 780,
     "joker_fallbacks": 0,
-    "stall_ms": 477.57768630981445
+    "stall_ms": 468.92476081848145
    },
    "art_fallbacks": 0
   },
   "HASH-TOKEN": {
-   "eval": 1.9070113927125931,
-   "init_eval": 4.15846837759018,
+   "eval": 1.864722916483879,
+   "init_eval": 4.18246957063675,
    "tokens": 200192,
-   "time_s": 10.227344036102295,
-   "tok_s": 19574.192409419957,
+   "time_s": 10.096271753311157,
+   "tok_s": 19828.309388992562,
    "usage": [
     0.408,
     0.514,
     0.529,
     0.549
    ],
-   "trainable": 268992
+   "trainable": 269056
   }
  },
  "seed2": {
   "ASSOC": {
-   "eval": 3.578852504491806,
-   "init_eval": 4.166668152809143,
+   "eval": 2.8518201231956484,
+   "init_eval": 4.1690076231956485,
    "tokens": 200192,
-   "time_s": 16.59701371192932,
-   "tok_s": 12061.928939427782,
+   "time_s": 38.512470960617065,
+   "tok_s": 5198.1084310252845,
    "usage": [
     0.204,
     0.257,
     0.265,
     0.274
    ],
-   "trainable": 39104,
+   "trainable": 39168,
    "pager": {
-    "hits": 3120,
-    "faults_sync": 644,
-    "faults_covered": 3120,
-    "faults_waited": 14,
+    "hits": 2340,
+    "faults_sync": 1422,
+    "faults_covered": 2342,
+    "faults_waited": 2,
     "evictions": 3760,
-    "writebacks": 1560,
+    "writebacks": 780,
     "joker_fallbacks": 0,
-    "stall_ms": 486.5410327911377
+    "stall_ms": 431.24985694885254
    },
    "art_fallbacks": 0
   },
   "HASH-TOKEN": {
-   "eval": 1.8202507227659226,
-   "init_eval": 4.140041637420654,
+   "eval": 1.8137552261352539,
+   "init_eval": 4.158563184738159,
    "tokens": 200192,
-   "time_s": 10.063310623168945,
-   "tok_s": 19893.25456565897,
+   "time_s": 9.703726768493652,
+   "tok_s": 20630.42424586699,
    "usage": [
     0.408,
     0.514,
     0.529,
     0.549
    ],
-   "trainable": 268992
+   "trainable": 269056
   }
  }
 }

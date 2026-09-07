@@ -126,6 +126,36 @@ appris en delta-rule locale sur ce crédit). Ou axe matériel : hypervecteurs
 binaires (÷32, Hamming). L'infra v2 reste intacte : O(1), prefetch 83 %, writeback
 bit-à-bit, 0 joker — la campagne n'a rien cassé (régressions vertes).
 
+## 9. v3 — Readout localement-linéaire + crédit exact 1-couche (gap −40 %)
+
+Design : tête à pooling attentif (1 vecteur requête) → crédit par token en
+FORME CLOSE δ_t = a_t·((p−y)@W), backprop exacte à 1 couche, zéro graphe ;
+chaque slot apprend o = v+A(q−c) en delta-rule WTA sur ce crédit (covariance
+E[δ⊗(q−c)] — l'outer des moyennes n'apprend rien, bug trouvé et fixé : MSE
+2.20 → 0.00 en synthèse). Clés toujours Hebbiennes (loi v2 respectée).
+
+**Découverte crédit-en-profondeur** : un bug (eta écrasé → experts gelés) a révélé
+le baseline identité 2.898 < delta-2-blocs 2.99 — le crédit n'est exact qu'au
+DERNIER bloc (Jacobien non-identité en amont → bruit). Delta dernier-bloc-seul :
+**2.889 > identité** (même seed, même données). Amont gelé à v=A=0.
+
+| Config (seed-0) | Eval | Note |
+|---|---|---|
+| v2′ lookup + tête attentive | 3.429 | tête attentive seule : −0.13 |
+| v3 delta 2 blocs | 2.992 | readout expressif : −0.44 |
+| v3 last-only / +η.1 / +M16 | 2.889 / **2.883** / 2.883 | crédit placé ; capacité neutre |
+| Hybride (legacy amont + delta aval) | 3.103 | même le legacy amont nuit → gel |
+| Identité gelée (baseline accidentel→officiel) | 2.898 | tout expert amont nuit sur la sonde |
+
+**Run 3 seeds** : ASSOC **2.882** (2.883/2.912/2.852) vs HASH-TOKEN **1.859**
+(Δ +1.02, était +1.68). Dense quasi-insensible à la tête (1.86 vs 1.87) :
+comparaison stable. ASSOC passe sous SCRATCH-router-appris (2.89).
+
+Limites honnêtes : +0.015 vs identité (seed-0) — les experts restent marginaux
+**sur cette sonde dominée par le tronc** (mémoire hiérarchique + tête font tout) ;
+cartes plein-rang (4k params/slot, rang faible requis à l'échelle) ; 4× plus lent
+que dense (20k MACs/token — Hamming arrive §10). v4 candidate : slots MLP locaux.
+
 ## 7. Usage
 
 ```bash

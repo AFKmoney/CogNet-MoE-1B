@@ -36,12 +36,15 @@ from refute_edt import (make_trunk, make_pattern, probe_batch_fn, trunk_hidden,
                         TokenCounter, VPROBE)
 from hash_moe import convert_to_hash
 from expert_pager import ExpertPager, PagerConfig, hash_ahead_pages, working_set_hint
-from assoc_experts import convert_to_assoc
+from assoc_experts import convert_to_assoc, AttentiveHead, head_credit
 
 SEEDS = [0, 1, 2]
 TOKENS = 200_000
 VIGILANCE = 0.0  # ART-label dégénère (histogrammes uniformes, cf. rapport §8)
-NOVELTY_GAMMA = 2.0  # match-tracking (ablation : 2 aide, 4 oublie)
+NOVELTY_GAMMA = 0.0  # neutre avec delta (cf. rapport §9)
+READOUT = "delta"  # v3 : delta-rule locale, dernier bloc seul (cf. rapport §9)
+DELTA_BLOCKS = "last"  # crédit exact au dernier bloc ; amont gelé (cf. §9)
+HEBB_ETA = 0.1
 B, T = 16, 32
 
 
@@ -62,14 +65,15 @@ def assoc_eval(model, head, batch_fn, n_batches=40):
         x, y = batch_fn(16, 32)
         set_ids(model, x)
         h, _, _ = trunk_hidden(model, x)
-        tot += F.cross_entropy(head(h.mean(dim=1)), y).item(); n += 1
+        logits, _ = head(h)
+        tot += F.cross_entropy(logits, y).item(); n += 1
     model.train(); head.train()
     return tot / n
 
 
 def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
               bind_alpha=0.0, vigilance=0.0, lsh_hint=False, novelty_gamma=0.0,
-              tag=""):
+              readout="legacy", delta_blocks="all", tag=""):
     """Boucle partagée (équité stricte) ; Hebb (+binding +ART) distingue ASSOC."""
     opt = torch.optim.AdamW(list(model.parameters()) + list(head.parameters()), lr=3e-4)
     steps = max(1, tokens // (B * T))
@@ -87,7 +91,8 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
         set_ids(model, x, y if vigilance > 0 else None)
         opt.zero_grad()
         h, aux, z = trunk_hidden(model, x)
-        loss = F.cross_entropy(head(h.mean(dim=1)), y)
+        logits, _ = head(h)
+        loss = F.cross_entropy(logits, y)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(head.parameters()), 1.0)
         opt.step()
@@ -100,12 +105,25 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
             with torch.no_grad():
                 if bind_alpha > 0:  # embedding du label, détaché (cible)
                     le = model.encoder.token_emb(y).repeat_interleave(T, dim=0)
-            for blk in model.blocks:
+            re = None
+            if readout == "delta":  # crédit exact 1-couche, par formule (0 graphe)
+                re, _ = head_credit(head, h.detach(), y)
+                if delta_blocks != "hybrid":
+                    le = None  # delta subsumes le binding (cibles en conflit sinon)
+            nblocks = len(model.blocks)
+            for bi, blk in enumerate(model.blocks):
                 r = blk.cognitive_expert_router
                 ly = y if vigilance > 0 else None
-                r.hebbian_step(eta=hebbian_eta, label_emb=le, label_alpha=bind_alpha,
+                re_b, le_b = re, le
+                if readout == "delta" and delta_blocks in ("last", "hybrid") \
+                        and bi < nblocks - 1:
+                    re_b = None  # blocs amont : pas de crédit (Jacobien non-identité)
+                    if delta_blocks == "last":
+                        continue  # experts amont gelés à l'identité (v=A=0)
+                    # hybride : amont en legacy stable (Hebb+binding), aval en delta
+                r.hebbian_step(eta=hebbian_eta, label_emb=le_b, label_alpha=bind_alpha,
                                label_ids=ly, rho=vigilance if vigilance > 0 else 0.5,
-                               novelty_gamma=novelty_gamma)
+                               novelty_gamma=novelty_gamma, readout_err=re_b)
             recent = sorted(pager.resident.keys())[-8:]
         cur = nxt
     if pager is not None:
@@ -115,20 +133,20 @@ def train_arm(model, head, batch_fn, tokens, pager=None, hebbian_eta=0.0,
 
 def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
             n_mem_slots=8, window=4, bind_alpha=0.0, vigilance=0.0, mode="token",
-            novelty_gamma=0.0):
+            novelty_gamma=0.0, readout="legacy", eta=0.05, delta_blocks="all"):
     t0 = time.time()
     counter = TokenCounter()
     pattern = make_pattern(pattern_seed)
     torch.manual_seed(9000 + seed)
-    head = nn.Linear(64, VPROBE)
+    head = AttentiveHead(64, VPROBE)
     trunk = make_trunk(VPROBE, seed=seed)  # init appariée entre bras
     pager = None
-    eta = 0.0
+    if kind != "ASSOC":
+        eta = 0.0  # bras dense : pas de Hebb (le gradient fait tout)
     if kind == "ASSOC":
         pager = ExpertPager(PagerConfig(store_dir=f"/tmp/assoc_exp_{seed}", num_loaders=4))
         model = convert_to_assoc(trunk, n_slots=2, pager=pager, n_mem_slots=n_mem_slots,
                                  window=window, seed=seed, n_labels=VPROBE, mode=mode)
-        eta = 0.05
     else:
         model = convert_to_hash(trunk, mode="token")
     ntrain = sum(p.numel() for p in list(model.parameters()) + list(head.parameters())
@@ -137,7 +155,9 @@ def run_arm(kind, seed, total_tokens, pattern_seed=7, noise=0.1,
     init_eval = assoc_eval(model, head, probe_batch_fn(pattern, noise, seed=9999))
     train_arm(model, head, probe_fn, total_tokens, pager, eta, bind_alpha,
               vigilance, lsh_hint=(kind == "ASSOC" and mode == "lsh"),
-              novelty_gamma=novelty_gamma, tag=f"{kind}{seed}")
+              novelty_gamma=novelty_gamma,
+              readout=(readout if kind == "ASSOC" else "legacy"),
+              delta_blocks=delta_blocks, tag=f"{kind}{seed}")
     loss = assoc_eval(model, head, probe_batch_fn(pattern, noise, seed=9999))
     dt = time.time() - t0
     model.eval()
@@ -162,8 +182,9 @@ def main():
     print("=" * 70)
     results = {}
     for seed in SEEDS:
-        a = run_arm("ASSOC", seed, TOKENS, bind_alpha=0.5, vigilance=VIGILANCE,
-                    novelty_gamma=NOVELTY_GAMMA)
+        a = run_arm("ASSOC", seed, TOKENS, vigilance=VIGILANCE,
+                    novelty_gamma=NOVELTY_GAMMA, readout=READOUT,
+                    delta_blocks=DELTA_BLOCKS, eta=HEBB_ETA)
         h = run_arm("HASH-TOKEN", seed, TOKENS)
         results[f"seed{seed}"] = {"ASSOC": a, "HASH-TOKEN": h}
         print(f"  seed {seed} ASSOC     : eval={a['eval']:.4f} (init {a['init_eval']:.4f}) "
@@ -189,8 +210,12 @@ def ablate():
     print("=" * 70)
     print("Ablation seed-0 : M/W × binding label (200k tokens chacun)")
     print("=" * 70)
-    for tag, kw in [("a.25/nov2", {"bind_alpha": 0.25, "novelty_gamma": 2.0}),
-                    ("a.5/nov4", {"bind_alpha": 0.5, "novelty_gamma": 4.0})]:
+    for tag, kw in [("last-eta.1", {"readout": "delta", "delta_blocks": "last",
+                                   "eta": 0.1}),
+                    ("last-M16W8", {"readout": "delta", "delta_blocks": "last",
+                                    "n_mem_slots": 16, "window": 8}),
+                    ("hybrid", {"readout": "delta", "delta_blocks": "hybrid",
+                                "bind_alpha": 0.5, "novelty_gamma": 2.0})]:
         a = run_arm("ASSOC", 0, TOKENS, **kw)
         p = a["pager"]
         print(f"  {tag:12s}: eval={a['eval']:.4f} tok/s={a['tok_s']:.0f} "

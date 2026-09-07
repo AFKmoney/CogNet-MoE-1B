@@ -108,9 +108,12 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
                    win_start: torch.Tensor, window: int,
                    label_ids: Optional[torch.Tensor] = None,
                    label_hist: Optional[torch.Tensor] = None,
-                   rho: float = 0.5, commit_min: int = 3):
+                   rho: float = 0.5, commit_min: int = 3,
+                   amaps: Optional[torch.Tensor] = None,
+                   centers: Optional[torch.Tensor] = None):
     """
     q (N,D) → out (N,D) + poids (N,W) + gagnants (N,) + codes z (N,D) + replis.
+    Readout v3 : o_s = v_s + A_s(q−c_s) (cartes locales, None = lookup pur).
     Fenêtre circulaire de W slots depuis win_start, rerank par similarité.
     Si labels fournis (train) : VIGILANCE ART — le gagnant est le premier slot
     du rang de similarité dont l'historique accepte le label
@@ -128,7 +131,12 @@ def assoc_retrieve(q: torch.Tensor, proj: torch.Tensor,
     k = keys.float()[idx]  # (N,W,D)
     scores = (z.unsqueeze(1) * k).sum(-1) / math.sqrt(D)
     w = torch.softmax(scores, -1).to(q.dtype)
-    out = (w.unsqueeze(-1) * values.float()[idx]).sum(1).to(q.dtype)
+    v = values.float()[idx]  # (N,W,D)
+    if amaps is not None and centers is not None:  # cartes locales v3
+        d = q.float().unsqueeze(1) - centers.float()[idx]  # (N,W,D)
+        corr = (amaps.float()[idx] @ d.unsqueeze(-1)).squeeze(-1)
+        v = v + corr
+    out = (w.unsqueeze(-1) * v).sum(1).to(q.dtype)
     order = scores.argsort(dim=-1, descending=True)  # rangs de similarité
     ar = torch.arange(N, device=q.device)
     winners = idx[ar, order[:, 0]]
@@ -159,12 +167,18 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
                    label_alpha: float = 0.5,
                    label_ids: Optional[torch.Tensor] = None,
                    label_hist: Optional[torch.Tensor] = None,
-                   sample_weight: Optional[torch.Tensor] = None):
+                   sample_weight: Optional[torch.Tensor] = None,
+                   readout_err: Optional[torch.Tensor] = None,
+                   amaps: Optional[torch.Tensor] = None,
+                   centers: Optional[torch.Tensor] = None):
     """
     Superposition directe WTA-EMA (vectorisée) — in-place, sans gradient.
     Gagnants multiples sur le même slot : moyenne des cibles d'abord.
     sample_weight (N,) : plasticité par token (match-tracking : les tokens
     surpris — faible confiance de retrieval — absorbent plus).
+    readout_err (N,D) : crédit exact 1-couche → branche DELTA v3 : v et A
+    corrigent l'erreur (rank-1), c suit les entrées. Sans err : legacy
+    (attraction + binding). Les clés restent TOUJOURS Hebbiennes (loi v2).
     Si label_emb : binding HDC requête⊕label sur les VALUES (les clés restent
     en espace-q pour le matching à l'éval, où le label est inconnu).
     Si label_ids + label_hist : trace ART (le slot gagnant absorbe le label).
@@ -188,7 +202,27 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
     sumq.index_add_(0, winners, q.float() * sw.unsqueeze(-1))
     tz = sumz[mask] / cnt[mask].unsqueeze(-1)
     tq = sumq[mask] / cnt[mask].unsqueeze(-1)
-    if label_emb is not None:  # supervision locale, toujours sans gradient
+    if readout_err is not None:  # v3 : delta-rule WTA sur le readout
+        assert amaps is not None and centers is not None
+        sume = torch.zeros_like(values.float())
+        sume.index_add_(0, winners, readout_err.float() * sw.unsqueeze(-1))
+        de = sume[mask] / cnt[mask].unsqueeze(-1)  # erreur moyenne/slot
+        # Covariance E[δ⊗(q−c)] par slot (PAS l'outer des moyennes : les erreurs
+        # s'annuleraient et rien ne serait appris — delta-rule correcte).
+        cw = centers.float()[winners]  # (N,D) centre du gagnant de chaque token
+        dd = q.float() - cw
+        sumo = torch.zeros(mask.shape[0], values.shape[1] * values.shape[1],
+                           device=q.device)
+        oo = (readout_err.float().unsqueeze(-1) * dd.unsqueeze(-2)).reshape(
+            winners.shape[0], -1)
+        sumo.index_add_(0, winners, oo * sw.unsqueeze(-1))
+        cov = (sumo[mask] / cnt[mask].unsqueeze(-1)).reshape(
+            -1, values.shape[1], values.shape[1])
+        values[mask] = (values.float()[mask] - eta * de).to(values.dtype)
+        amaps[mask] = (amaps.float()[mask] - eta * cov).to(amaps.dtype)
+        centers[mask] = (centers.float()[mask]
+                         + eta * (tq - centers.float()[mask])).to(centers.dtype)
+    elif label_emb is not None:  # legacy : binding HDC requête⊕label
         suml = torch.zeros_like(values.float())
         suml.index_add_(0, winners, label_emb.float())
         tq = tq + label_alpha * (suml[mask] / cnt[mask].unsqueeze(-1))
@@ -196,7 +230,9 @@ def hebbian_update(keys: torch.Tensor, values: torch.Tensor, counts: torch.Tenso
         label_hist[winners, label_ids] += 1
     keys[mask] = F.normalize(keys.float()[mask] + eta * (tz - keys.float()[mask]),
                              dim=-1).to(keys.dtype)
-    values[mask] = (values.float()[mask] + eta * (tq - values.float()[mask])).to(values.dtype)
+    if readout_err is None:  # legacy : values attractées (delta gère v sinon)
+        values[mask] = (values.float()[mask]
+                        + eta * (tq - values.float()[mask])).to(values.dtype)
     counts[mask] = counts.float()[mask] + cnt[mask].to(counts.dtype)
     return n_touched
 
@@ -217,6 +253,9 @@ class AssocSlot(nn.Module):
         # Trace ART par slot (int32 : stockée EXACTE, jamais quantifiée).
         self.register_buffer("label_hist", torch.zeros(n_mem_slots, n_labels,
                                                        dtype=torch.int32))
+        # Readout v3 : carte locale o = v + A(q−c) par slot (zéro-init = lookup).
+        self.register_buffer("amaps", torch.zeros(n_mem_slots, hidden_dim, hidden_dim))
+        self.register_buffer("centers", torch.zeros(n_mem_slots, hidden_dim))
 
 
 class PagedAssocExpertRouter(nn.Module):
@@ -277,7 +316,9 @@ class PagedAssocExpertRouter(nn.Module):
                   "values": torch.zeros(M, D),   # démarrage froid = sortie nulle
                   "counts": torch.zeros(M),
                   "proj": torch.randn(D, D, generator=g) / math.sqrt(D),
-                  "label_hist": torch.zeros(M, self.n_labels, dtype=torch.int32)}
+                  "label_hist": torch.zeros(M, self.n_labels, dtype=torch.int32),
+                  "amaps": torch.zeros(M, D, D),  # cartes nulles = lookup pur
+                  "centers": torch.zeros(M, D)}
             pager.store.save_page(self.block_idx, e, sd)
 
     def install_page(self, page: PageId, sd: Dict[str, torch.Tensor], slot: int):
@@ -290,6 +331,11 @@ class PagedAssocExpertRouter(nn.Module):
             s.label_hist.copy_(sd["label_hist"].to(s.label_hist.dtype))
         else:
             s.label_hist.zero_()
+        for k in ("amaps", "centers"):  # compat v2 → v3 (lookup pur)
+            if k in sd:
+                getattr(s, k).copy_(sd[k].to(getattr(s, k).dtype))
+            else:
+                getattr(s, k).zero_()
 
     def read_slot(self, slot: int) -> Dict[str, torch.Tensor]:
         s = self.slots[slot]
@@ -297,7 +343,9 @@ class PagedAssocExpertRouter(nn.Module):
                 "values": s.values.detach().cpu().clone(),
                 "counts": s.counts.detach().cpu().clone(),
                 "proj": s.proj.detach().cpu().clone(),
-                "label_hist": s.label_hist.detach().cpu().clone()}
+                "label_hist": s.label_hist.detach().cpu().clone(),
+                "amaps": s.amaps.detach().cpu().clone(),
+                "centers": s.centers.detach().cpu().clone()}
 
     # ── Adressage / forward ──────────────────────────────────────
     @property
@@ -367,7 +415,7 @@ class PagedAssocExpertRouter(nn.Module):
                             flat_n[sel, k], self.window,
                             label_ids=y_exp[sel] if y_exp is not None else None,
                             label_hist=slot.label_hist if y_exp is not None else None,
-                            rho=self._rho)
+                            rho=self._rho, amaps=slot.amaps, centers=slot.centers)
                         self._fallbacks += fb
                         combined[sel] += w[sel, k].unsqueeze(-1).to(out_k.dtype) * out_k
         out = self.norm(combined.view(B, T, D))
@@ -396,13 +444,15 @@ class PagedAssocExpertRouter(nn.Module):
     def hebbian_step(self, eta: float = 0.05, label_emb: Optional[torch.Tensor] = None,
                      label_alpha: float = 0.5,
                      label_ids: Optional[torch.Tensor] = None,
-                     rho: float = 0.5, novelty_gamma: float = 0.0) -> Dict[str, int]:
+                     rho: float = 0.5, novelty_gamma: float = 0.0,
+                     readout_err: Optional[torch.Tensor] = None) -> Dict[str, int]:
         """
         Superposition Hebbienne sur les pages du dernier forward.
         label_emb (N,D) : binding requête⊕label sur values (supervisé, 0 grad).
         label_ids (B,) : vigilance ART (gagnants catégoriels) + trace hist.
         novelty_gamma : match-tracking — poids ×(1+γ·(1−confiance)) ; les tokens
             surpris absorbent plus (allocation, pas adressage — 0 gradient).
+        readout_err (N,D) : crédit exact 1-couche → delta-rule v3 sur (v,A,c).
         Retourne {page: slots_touchés}. Pages frozen sautées (palimpseste).
         """
         assert self._last is not None, "hebbian_step après forward"
@@ -430,7 +480,7 @@ class PagedAssocExpertRouter(nn.Module):
                     flat_n[sel, k], self.window,
                     label_ids=y_exp[sel] if y_exp is not None else None,
                     label_hist=slot.label_hist if y_exp is not None else None,
-                    rho=rho)
+                    rho=rho, amaps=slot.amaps, centers=slot.centers)
                 self._fallbacks += fb
                 le = label_emb[sel] if label_emb is not None else None
                 ly = y_exp[sel] if y_exp is not None else None
@@ -438,15 +488,48 @@ class PagedAssocExpertRouter(nn.Module):
                 if novelty_gamma > 0:  # surpris → plastique (confiance gratuite)
                     conf = w8.max(-1).values.float()
                     sw = 1.0 + novelty_gamma * (1.0 - conf)
+                re = readout_err[sel] if readout_err is not None else None
                 n += hebbian_update(slot.keys, slot.values, slot.counts,
                                     z, x_flat[sel], winners, eta, le, label_alpha,
                                     ly, slot.label_hist if y_exp is not None else None,
-                                    sw)
+                                    sw, re, slot.amaps, slot.centers)
             touched[f"b{self.block_idx}e{e}"] = n
         if touched:
             self.pager.mark_dirty([(self.block_idx, e) for e in pages
                                    if e not in self._frozen_pages])
         return touched
+
+
+class AttentiveHead(nn.Module):
+    """Tête sonde : pooling attentif (1 vecteur requête) + linéaire.
+    Le pooling attentif donne le crédit PAR TOKEN en forme close (head_credit)
+    — exact à travers cette unique couche, sans aucun graphe autograd."""
+
+    def __init__(self, hidden_dim: int, vocab: int):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(hidden_dim) / math.sqrt(hidden_dim))
+        self.out = nn.Linear(hidden_dim, vocab)
+
+    def forward(self, h: torch.Tensor):
+        a = torch.softmax(h.float() @ self.query.float() / math.sqrt(h.shape[-1]), dim=1)
+        pooled = (a.unsqueeze(-1) * h.float()).sum(1).to(h.dtype)
+        return self.out(pooled), a.to(h.dtype)
+
+
+@torch.no_grad()
+def head_credit(head: AttentiveHead, h: torch.Tensor, y: torch.Tensor):
+    """δ_t = a_t · ((p−y) @ W) : backprop EXACTE à 1 couche, par formule.
+    Exact pour le dernier bloc ; approx résiduelle (Jacobien ≈ I) en amont.
+    (N,D) erreurs + (B,T) attentions. Zéro graphe, zéro paramètre."""
+    B, T, D = h.shape
+    V = head.out.weight.shape[0]
+    a = torch.softmax(h.float() @ head.query.float() / math.sqrt(D), dim=1)
+    pooled = (a.unsqueeze(-1) * h.float()).sum(1)
+    p = torch.softmax(pooled @ head.out.weight.float().T + head.out.bias.float(), -1)
+    e = p - F.one_hot(y.reshape(-1), V).float()  # (B,V)
+    dseq = e @ head.out.weight.float()  # (B,D) erreur 1-couche
+    delta = (a.unsqueeze(-1) * dseq.unsqueeze(1)).reshape(B * T, D).to(h.dtype)
+    return delta, a.to(h.dtype)
 
 
 def convert_to_assoc(model: CogNetMoE1B, n_slots: int, pager: ExpertPager,
@@ -564,6 +647,40 @@ def self_test():
     print(f"  pureté moyenne des slots : {pur:.3f} (utilisés {int(used.sum())}/{M2})")
     assert pur > 0.9, "ART n'a pas séparé les labels!"
     print("  ✓ VIGILANCE ART SÉPARE LES CATÉGORIES (scalpel discret)")
+
+    # [2c] Delta-rule v3 : un slot unique apprend une application linéaire.
+    print("\n[2c] Delta-rule locale (régression linéaire, 0 gradient)...")
+    torch.manual_seed(3)
+    D3, M3 = 8, 1
+    proj3 = torch.eye(D3)
+    keys3 = F.normalize(torch.randn(M3, D3), dim=-1)
+    values3 = torch.zeros(M3, D3)
+    counts3 = torch.zeros(M3)
+    amaps3 = torch.zeros(M3, D3, D3)
+    centers3 = torch.zeros(M3, D3)
+    Ttrue = torch.randn(D3, D3) * 0.5
+    def mse():
+        qq = torch.randn(256, D3)
+        oo, _, _, _, _ = assoc_retrieve(qq, proj3, keys3, values3,
+                                        torch.zeros(256, dtype=torch.long), 1,
+                                        amaps=amaps3, centers=centers3)
+        return ((oo - qq @ Ttrue.T) ** 2).mean().item()
+    m0 = mse()
+    for step in range(200):
+        q = torch.randn(256, D3)
+        tgt = q @ Ttrue.T
+        _, _, winners, z, _ = assoc_retrieve(q, proj3, keys3, values3,
+                                             torch.zeros(256, dtype=torch.long), 1,
+                                             amaps=amaps3, centers=centers3)
+        o, _, _, _, _ = assoc_retrieve(q, proj3, keys3, values3,
+                                       torch.zeros(256, dtype=torch.long), 1,
+                                       amaps=amaps3, centers=centers3)
+        hebbian_update(keys3, values3, counts3, z, q, winners, eta=0.05,
+                       readout_err=(o - tgt), amaps=amaps3, centers=centers3)
+    m1 = mse()
+    print(f"  MSE carte locale : {m0:.3f} → {m1:.3f}")
+    assert m1 < m0 * 0.2, "la delta-rule n'a pas appris la carte!"
+    print("  ✓ DELTA-RULE APPREND UNE FONCTION (readout expressif, 0 backprop)")
 
     # [3] Boucle paginée : déterminisme + writeback exact + 0 param expert.
     print("\n[3] Boucle paginée associative (E=4, S=2, M=8, W=4)...")
