@@ -86,6 +86,10 @@ TokenEncoder (RoPE + RMSNorm, separable for EDT Phase 2b)
 | `edt_pipeline.py` | EDT 4-phase pipeline + PGSU + prerequisites check + aux-loss clamping |
 | `chinchilla_scaling.py` | Params breakdown + Chinchilla + CharTokenizer vs BPE 16k comparison |
 | `run_cognet_moe.py` | CLI orchestrator with `--self-test` flag |
+| `fast_train.py` | Fast training stack (memmap dataset, fast router, FastTrainer) |
+| `phase_routed_moe.py` | Phase-Routed MoE (on-the-fly experts, infinite training) |
+| `run_infinite.py` | Lifelong multi-phase training orchestrator |
+| `FAST_TRAINING.md` | Fast + infinite training guide (French) |
 | `training_time_estimate.json` | Training time estimates (RTX 3090/4090, A100, H100, H200) |
 | `CogNet-MoE-1B_Whitepaper.pdf` | Technical whitepaper (French, 18 pages) |
 | `source/` | Original CogNet-1B code (cloned from GitHub) |
@@ -163,6 +167,24 @@ python3 cognet_moe.py
 8. bf16 + bitsandbytes 8-bit Adam
 9. torch.compile (mode=reduce-overhead)
 10. Batch packing
+
+## Fast & infinite training
+
+- **Fast stack** (`fast_train.py`): pre-tokenized memmap dataset, single-pass
+  fast router (numerically identical), `torch.compile`, fused/8-bit optimizers,
+  PGSU, seq-len curriculum, resumable checkpoints, DDP-ready.
+  Projected: 1.36B tokens in ~2.5–4 days on RTX 3090 (was ~10 days), ~2–3h on H100.
+- **Phase-Routed MoE** (`phase_routed_moe.py` + `run_infinite.py`): phase-conditioned
+  CogNet-native routing, on-the-fly expert creation (clone-busiest + noise),
+  frozen old experts (no catastrophic forgetting), infinite `.pt` checkpoints.
+  Each new billion tokens costs ~15–25% of a full train.
+
+See **[FAST_TRAINING.md](FAST_TRAINING.md)** (French) for the full guide.
+
+```bash
+python3 fast_train.py --build-bin --txt corpus.txt --tokenizer cognet_tokenizer.json --out data/p0
+python3 run_infinite.py --bins data/p0.bin --tokens-per-phase 1000000000 --compile reduce-overhead
+```
 
 ## License
 
