@@ -101,6 +101,10 @@ TokenEncoder (RoPE + RMSNorm, séparable pour EDT Phase 2b)
 | `phase_routed_moe.py` | Phase-Routed MoE (experts à la volée, entraînement infini) |
 | `run_infinite.py` | Orchestrateur d'entraînement lifelong multi-phases |
 | `FAST_TRAINING.md` | Guide entraînement rapide + infini |
+| `hash_moe.py` + `hash_experiment.py` | Routage par hash (0 params, bat le learned de ~0.8 nats) |
+| `HASH_ROUTING_REPORT.md` | Verdict routage hash |
+| `expert_pager.py` | Pagination disque des experts (LRU + prefetch async, bit-exact) |
+| `EXPERT_PAGER_REPORT.md` | Verdict pager + anatomie du masquage de latence |
 | `training_time_estimate.json` | Estimation temps d'entraînement (RTX 3090/4090, A100, H100, H200) |
 | `source/` | Code original CogNet-1B (cloné depuis GitHub) |
 | `CogNet-MoE-1B_Whitepaper.pdf` | Whitepaper technique (français, ~30 pages) |
