@@ -191,19 +191,23 @@ Deux pièges documentés avant le gain :
 
 | 3 seeds (200k, inits appariées) | seed-0 | seed-1 | seed-2 | Moy |
 |---|---|---|---|---|
-| v3 linéaire (`assoc_results.json`) | 2.8893 | 2.9117 | 2.8518 | 2.8843 |
-| v4 mlp-H16 | 2.8852 | 2.9059 | 2.8442 | **2.8784 (Δ −0.006, 3/3 même signe)** |
-| v4 mlp-H32 | 2.8739 | 2.9139 | 2.8529 | 2.8802 (Δ −0.004, bruité) |
+| v3 linéaire (`assoc_results.json`) | 2.8826 | 2.9117 | 2.8518 | 2.8820 |
+| v4 mlp-H16 (`assoc_results_v4.json`) | 2.8852 | 2.9059 | 2.8442 | 2.8784 (Δ −0.004, 2/3) |
+| v4 mlp-H32 | 2.8739 | 2.9139 | 2.8529 | 2.8802 (Δ −0.002, bruit) |
 
-Mécanisme (normes finales H32/seed-2) : U gelé à l'init (±1 %), V 0→0.27,
-A 1.8, v 0.45 → v4 = v3 + random-features SiLU à readout appris (style ELM,
-100 % local). U ne dégèle jamais en 200k tokens : le piège à deux échelles
-persiste pour la couche 1. Honnête : le non-linéaire mord mais le mur est
-l'efficacité-échantillon, pas la capacité (3/3 signes à H16 : p≈1/8, suggestif,
-pas conclusif). Coût : +M·H·D·2 fp32/page (H16 : +64 Ko).
-**Loi** : un readout non-linéaire doit démarrer NUL (résidu zéro-init) sinon son
-bruit d'init pollue le socle ; en 200k tokens le gain vient des features
-aléatoires, pas d'un U appris.
+Baseline verrouillée : v3 relancée avec le code actuel reproduit la gelée à
+l'identique (seed-0 bis = 2.8826 — le refactor v4 est neutre sur le chemin
+delta, runs déterministes). Mécanisme (normes finales H32/seed-2) : U gelé à
+l'init (±1 %), V 0→0.27, A 1.8, v 0.45. **Verdict honnête : pas de gain
+mesurable** — H16 −0.004 sur 2/3 seeds est à la limite du bruit, H32 est du
+bruit. Le MLP apprend ([2e] ÷5, V décolle) mais n'aide pas en 200k tokens.
+Coût : +M·H·D·2 fp32/page (H16 : +64 Ko).
+**Loi** (conforte la direction superposition pure) : tout ce qui apprend dans
+ce système (v, A, V) est une **superposition directe** δ⊗activation ; la seule
+chose qui n'apprend pas (U) est la seule qui exige la **règle de chaîne** à
+travers V. v4 falsifie « plus de backprop locale aide » : la profondeur
+différentiable ne mord pas, la superposition si. Le non-linéaire doit démarrer
+NUL (résidu zéro-init) sinon son bruit d'init pollue le socle (2.97 → 2.885).
 
 ## 7. Usage
 
