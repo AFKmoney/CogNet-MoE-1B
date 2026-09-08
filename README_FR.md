@@ -97,6 +97,16 @@ TokenEncoder (RoPE + RMSNorm, séparable pour EDT Phase 2b)
 | `edt_pipeline.py` | Pipeline EDT 4 phases + `PGSU` + vérification prérequis + aux-loss clamping |
 | `chinchilla_scaling.py` | Décomposition params + Chinchilla + comparaison CharTokenizer vs BPE 16k |
 | `run_cognet_moe.py` | Script de lancement orchestrant le tout |
+| `fast_train.py` | Stack d'entraînement rapide (dataset memmap, router fast, FastTrainer) |
+| `phase_routed_moe.py` | Phase-Routed MoE (experts à la volée, entraînement infini) |
+| `run_infinite.py` | Orchestrateur d'entraînement lifelong multi-phases |
+| `FAST_TRAINING.md` | Guide entraînement rapide + infini |
+| `hash_moe.py` + `hash_experiment.py` | Routage par hash (0 params, bat le learned de ~0.8 nats) |
+| `HASH_ROUTING_REPORT.md` | Verdict routage hash |
+| `expert_pager.py` | Pagination disque des experts (LRU + prefetch async, bit-exact) |
+| `EXPERT_PAGER_REPORT.md` | Verdict pager + anatomie du masquage de latence |
+| `assoc_experts.py` + `assoc_experiment.py` | Experts associatifs sans gradient (Hebbiens, paginés) |
+| `ASSOC_EXPERTS_REPORT.md` | Verdict substitution associative |
 | `training_time_estimate.json` | Estimation temps d'entraînement (RTX 3090/4090, A100, H100, H200) |
 | `source/` | Code original CogNet-1B (cloné depuis GitHub) |
 | `CogNet-MoE-1B_Whitepaper.pdf` | Whitepaper technique (français, ~30 pages) |
@@ -366,6 +376,24 @@ python3 run_cognet_moe.py \
 > CognitiveRouter = les 8 experts MoE, plus de gate séparé.
 
 ---
+
+## Training rapide + infini
+
+- **Stack rapide** (`fast_train.py`) : dataset memmap pré-tokenisé, router fast
+  (identique numériquement), `torch.compile`, optimizers fusés/8-bit, PGSU,
+  curriculum seq-len, checkpoints resumables, DDP-ready.
+  Projection : 1,36B tokens en ~2,5-4 jours sur RTX 3090 (vs ~10 jours), ~2-3h sur H100.
+- **Phase-Routed MoE** (`phase_routed_moe.py` + `run_infinite.py`) : routing CogNet-native
+  conditionné par phase, création d'experts à la volée (clone-busiest + bruit),
+  anciens experts gelés (pas de catastrophic forgetting), checkpoints `.pt` infinis.
+  Chaque nouveau milliard de tokens coûte ~15-25% d'un full-train.
+
+Voir **[FAST_TRAINING.md](FAST_TRAINING.md)** pour le guide complet.
+
+```bash
+python3 fast_train.py --build-bin --txt corpus.txt --tokenizer cognet_tokenizer.json --out data/p0
+python3 run_infinite.py --bins data/p0.bin --tokens-per-phase 1000000000 --compile reduce-overhead
+```
 
 ## License
 

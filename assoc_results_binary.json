@@ -1,0 +1,77 @@
+{
+ "seed0": {
+  "eval": 2.8902259886264803,
+  "init_eval": 4.162146043777466,
+  "tokens": 200192,
+  "time_s": 40.47267532348633,
+  "tok_s": 4946.3495654765475,
+  "usage": [
+   0.204,
+   0.257,
+   0.265,
+   0.274
+  ],
+  "trainable": 39168,
+  "pager": {
+   "hits": 2340,
+   "faults_sync": 1422,
+   "faults_covered": 2342,
+   "faults_waited": 6,
+   "evictions": 3760,
+   "writebacks": 780,
+   "joker_fallbacks": 0,
+   "stall_ms": 443.5713291168213
+  },
+  "art_fallbacks": 0
+ },
+ "seed1": {
+  "eval": 2.9119140684604643,
+  "init_eval": 4.198744690418243,
+  "tokens": 200192,
+  "time_s": 39.57243037223816,
+  "tok_s": 5058.875538269787,
+  "usage": [
+   0.204,
+   0.257,
+   0.265,
+   0.274
+  ],
+  "trainable": 39168,
+  "pager": {
+   "hits": 2340,
+   "faults_sync": 1422,
+   "faults_covered": 2342,
+   "faults_waited": 4,
+   "evictions": 3760,
+   "writebacks": 780,
+   "joker_fallbacks": 0,
+   "stall_ms": 441.39742851257324
+  },
+  "art_fallbacks": 0
+ },
+ "seed2": {
+  "eval": 2.852176141738892,
+  "init_eval": 4.1690076231956485,
+  "tokens": 200192,
+  "time_s": 39.44352674484253,
+  "tok_s": 5075.408223382973,
+  "usage": [
+   0.204,
+   0.257,
+   0.265,
+   0.274
+  ],
+  "trainable": 39168,
+  "pager": {
+   "hits": 2340,
+   "faults_sync": 1422,
+   "faults_covered": 2342,
+   "faults_waited": 8,
+   "evictions": 3760,
+   "writebacks": 780,
+   "joker_fallbacks": 0,
+   "stall_ms": 447.0362663269043
+  },
+  "art_fallbacks": 0
+ }
+}
