@@ -153,6 +153,8 @@ TokenEncoder (RoPE + RMSNorm, separable for EDT Phase 2b)
 | `EXPERT_PAGER_REPORT.md` | Pager verdict + latency-masking anatomy (French) |
 | `assoc_experts.py` + `assoc_experiment.py` | Gradient-free associative experts (Hebbian, paged) |
 | `ASSOC_EXPERTS_REPORT.md` | Assoc substitution verdict (French) |
+| `cpu_stack.py` | **CPU-only training stack** (exact fold of to_channels, hash routing, LISA-detach, sampled-softmax head, 8-bit CPU AdamW, P1 zero-data init, probe/bench/tables) |
+| `CPU_TRAINING_REPORT.md` | **Train CogNet without GPU** — the math (P1-P8), 3-seed probe, honest FLOP tables, 3 CPU routes (French) |
 | `training_time_estimate.json` | Training time estimates (RTX 3090/4090, A100, H100, H200) |
 | `CogNet-MoE-1B_Whitepaper.pdf` | Technical whitepaper (French, 18 pages) |
 | `source/` | Original CogNet-1B code (cloned from GitHub) |

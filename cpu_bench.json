@@ -1,0 +1,38 @@
+[
+  {
+    "arm": "legacy (coh\u00e9rence apprise)",
+    "tok_per_s": 5117.864071650889,
+    "params": 3034080,
+    "speedup_vs_legacy": 1.0
+  },
+  {
+    "arm": "cpu fold_res+hash",
+    "tok_per_s": 6451.607889052322,
+    "params": 3029472,
+    "speedup_vs_legacy": 1.2606055570700616
+  },
+  {
+    "arm": "cpu simplify+hash",
+    "tok_per_s": 6523.7331155579,
+    "params": 2808288,
+    "speedup_vs_legacy": 1.2746983945303407
+  },
+  {
+    "arm": "cpu simplify+hash+lisa(1/3)",
+    "tok_per_s": 13099.272383961628,
+    "params": 2808288,
+    "speedup_vs_legacy": 2.559519401173964
+  },
+  {
+    "arm": "cpu simplify+hash+sampled(S=64)",
+    "tok_per_s": 6467.907904660998,
+    "params": 2808288,
+    "speedup_vs_legacy": 1.2637904825351527
+  },
+  {
+    "arm": "cpu simplify+lowrank(D/4)",
+    "tok_per_s": 7480.049940485842,
+    "params": 928224,
+    "speedup_vs_legacy": 1.4615569768489325
+  }
+]
