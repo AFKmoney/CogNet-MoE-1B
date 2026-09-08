@@ -9,6 +9,62 @@
 [![Complexity](https://img.shields.io/badge/complexity-O(n)-green)]()
 [![License](https://img.shields.io/badge/license-MIT-yellow)]()
 
+## 📦 Start here: `cognet_pack/` (isolated, verified, trainable)
+
+> **Yes, CogNet-MoE-1B is functional and trainable.**
+> [`cognet_pack/`](cognet_pack/) is a self-contained folder — model, BPE tokenizer,
+> fast trainer, infinite trainer, hash routing, disk pager (~600 KB of code, zero
+> dependency on the rest of this repo) — verified live on CPU on 2026-09-07:
+> 4/4 self-tests green + real tiny training (loss 6.30 → 0.43 eval,
+> checkpoint strict-loads).
+>
+> ```bash
+> cd cognet_pack && pip install -r requirements.txt
+> python3 train.py --self-test   # ~1 min CPU — proves everything works
+> python3 train.py --demo        # ~2 min CPU — real tiny training + eval
+> ```
+>
+> Full French docs: [`cognet_pack/README.md`](cognet_pack/README.md).
+> **Training the real 1B tonight?** → [`cognet_pack/TONIGHT.md`](cognet_pack/TONIGHT.md)
+> (run **« Aurore » P0**, infinite from phase 0).
+
+## 🌙 Train tonight — Chinchilla math + time for 1B
+
+**The model**: 7.21B total MoE params, **2.38B active/token** (top-2/8) →
+cost ≈ 6 × 2.38B ≈ **14.3 GFLOP/token** (full backprop, infinite path).
+
+| Target | Tokens | Verdict |
+|---|---|---|
+| Chinchilla-optimal (20 tok / active param — the correct MoE reading) | **47.66B** | textbook optimum, not a single-GPU goal (~172d on 3090, ~19d on H100) |
+| EDT Scénario C (**the real target**, `chinchilla_report.json`) | **1.36B** | ~35× fewer tokens, recommended |
+
+**Time for the 1.36B target** (tok/s = bf16-peak × MFU ÷ 14.3 GFLOP; honest ranges,
+calibrate with `train.py --benchmark`):
+
+| GPU | tok/s | 1.36B target | **Tonight (8h)** |
+|---|---|---|---|
+| RTX 3090 | 2.5-5.5k | ~3-6 days | **~70-160M tokens** |
+| RTX 4090 | 6-12k | ~1-2 days | **~170-350M tokens** |
+| A100 40GB | 8-11k | ~1.5-2 days | **~220-320M tokens** |
+| H100 SXM | 24-35k | ~0.5-1 day | **~0.7-1.0B (≈ the whole target)** |
+| CPU only | ~10-30 (1B — useless) | — | tiny prototype only (`train.py --demo`) |
+
+**Tonight = « Aurore » P0.** Phase 0 of infinite training — the `.pt` grows
+forever afterwards (~15-25% of a full train per new billion tokens):
+
+```bash
+cd cognet_pack && pip install -r requirements.txt && pip install bitsandbytes
+python3 train.py --build-bin --txt corpus.txt --out data/aurore_p0 \
+    --tokenizer cognet_tokenizer.json
+# RTX 3090 overnight example (resumable):
+python3 run_infinite.py --bins data/aurore_p0.bin --tokens-per-phase 150000000 \
+    --batch-size 8 --grad-accum 8 --optimizer adamw8bit \
+    --compile reduce-overhead --ckpt-dir ./aurore_p0
+# Morning: cp aurore_p0/final.pt aurore-p0-final.pt  ← keep this, extend anytime
+```
+
+Per-GPU targets, VRAM notes, morning-after steps → [`cognet_pack/TONIGHT.md`](cognet_pack/TONIGHT.md).
+
 ## What is this?
 
 CogNet-MoE-1B adapts the original CogNet-1B (a non-transformer LLM with cognitive routing + 3-tier hierarchical memory) into a Mixture-of-Experts variant. The key architectural decision: **the 8 channels of the CognitiveRouter become the 8 MoE experts**, and the O(n) coherence router does the routing. No separate transformer-style gate is introduced.
@@ -80,6 +136,7 @@ TokenEncoder (RoPE + RMSNorm, separable for EDT Phase 2b)
 
 | File | Role |
 |---|---|
+| **`cognet_pack/`** | **Isolated, verified, trainable pack (start here) + `TONIGHT.md` (run « Aurore » P0)** |
 | `cognet_tokenizer.py` | BPE tokenizer (vocab 16k, FR+EN+code, ByteLevel) |
 | `cognet_tokenizer.json` | Trained tokenizer (HuggingFace format) |
 | `cognet_moe.py` | `CognitiveExpertRouter` (CogNet-native MoE) + `CogNetMoE1B` (full model) |
